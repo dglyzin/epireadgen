@@ -2,6 +2,8 @@ import numpy as np
 from random import random
 import functools as fs
 import inspect
+from string import Template
+import matplotlib.pyplot as plt
 
 
 class Dist():
@@ -288,10 +290,26 @@ class ARDistSimple():
 
         self.a = a
         self.b = b
-        # fix parameters in f (like sigma or mu):
-        self.f = fs.partial(f, **fargs)
-        self.fargs = fargs
+
+        self.f_orig = f
+        self.set_func_args(fargs)
+
         self.max_t = 0
+
+    def set_limits(self, low, up):
+        self.a = low
+        self.b = up
+
+    def set_func_args(self, fargs):
+        # fix parameters in f (like sigma or mu):
+        self.f = fs.partial(self.f_orig, **fargs)
+        self.fargs = fargs
+        # print(fargs)
+        self.preproc()
+
+    def set_func_arg(self, arg_name, arg_val):
+        self.fargs[arg_name] = arg_val
+        self.set_func_args(self.fargs)
 
     def preproc(self):
 
@@ -337,7 +355,7 @@ class ARDistSimple():
             
         if t > self.max_t:
             self.max_t = t
-            print("t= ", t)
+            print("maximum depth ", t)
         
         return(y)
 
@@ -397,41 +415,7 @@ class MH():
             
         return(xs[-2])
 
-
-class Property1(object):
-
-    def __init__(self, param_name):
-        self.param_name = param_name
-        # self.param_int = 3
-        # self.param_dict = {}
-
-    def __get__(self, instance, owner=None):
-        
-        # print(self.param_name)
-        # print(self.param_int)
-        # print(self.param_list)
-        # print(self.param_dict)
-
-        obj = instance.param[self.param_name]
-        if hasattr(obj, "type") and getattr(obj, "type") == "Dist":
-            # if object:
-            return(getattr(obj, "value"))
-        else:
-            return(obj)
-        
-    def __set__(self, instance, value):
-
-        if not hasattr(instance, "param"):
-            setattr(instance, "param", {})
-        instance.param[self.param_name] = value
-        
-        # self.param_int += 1
-        # self.param_dict[self.param_name] = self.param_int
-        # if self.param_int > 4:
-        #     self.param_dict.clear()
-
-
-
+'''
 class Property(object):
     storage = {}
 
@@ -448,13 +432,13 @@ class Property(object):
             self.storage[instance.name]["params"][self.attr] = {"value": None,
                                                                 "dist": None,
                                                                 "done": False}
-        '''
+         ''
         param_dist = self.storage[instance.name][self.attr]['dist']
         if param_dist is not None:
             value = self.storage[param_dist.name]['value']
             if value is not None:
                 return()
-        '''
+        ''
         # return as is:
         return(self.storage[instance.name][self.attr]['value'])
     
@@ -480,72 +464,303 @@ class Property(object):
         else:
             # if int or array
             self.storage[instance.name][self.attr]['value'] = value
+'''
 
+class Property1(object):
+
+    def __init__(self, param_name):
+        self.param_name = param_name
+        # self.param_int = 3
+        # self.param_dict = {}
+
+    def __get__(self, instance, owner=None):
         
-class Normal():
+        # print(self.param_name)
+        # print(self.param_int)
+        # print(self.param_list)
+        # print(self.param_dict)
+
+        obj = instance.params[self.param_name]
+        if hasattr(obj, "type") and getattr(obj, "type") == "Dist":
+            # if object:
+            value = getattr(obj, "value")
+            '''
+            old_value = instance.old_params[self.param_name]
+            
+            if old_value != value:
+                if hasattr(instance, "dist") and value is not None:
+                    instance.set_func_args()
+                instance.old_params[self.param_name] = value
+            '''
+            return(value)
+        else:
+            return(obj)
+        
+    def __set__(self, instance, value):
+
+        if not hasattr(instance, "params"):
+            setattr(instance, "params", {})
+        '''
+        if not hasattr(instance, "old_params"):
+            setattr(instance, "old_params", {})
+        # this must happend only at initialization: 
+        if self.param_name not in instance.old_params:
+            instance.old_params[self.param_name] = value
+        '''
+        instance.params[self.param_name] = value
+        
+        # if hasattr(instance, "dist") and value is not None:
+        #     instance.set_func_args()
+        # self.param_int += 1
+        # self.param_dict[self.param_name] = self.param_int
+        # if self.param_int > 4:
+        #     self.param_dict.clear()
+
+
+class DistParam():
+
+    def __init__(self, name):
+        
+        self.type = "Dist"
+        self.name = name
+        self.value = None
+        
+    def __get__(self):
+        return(self.value)
+
+    def __repr__(self):
+        return(str(self.value))
+
+    def all_params_ready(self):
+        params = self.get_params()
+        for param_name in params:
+            if params[param_name] is None:
+                return(False)
+        return(True)
+
+    def get_params(self):
+        return(dict((param_name, getattr(self, param_name))
+                    for param_name in self.params))
+
+    def sample_n(self, n):
+        return([self.sample() for i in range(n)])
+
+
+class Uniform(DistParam):
+    a = Property1("a")
+    b = Property1("b")
+    
+    def __init__(self, name, a=0, b=1):
+        
+        DistParam.__init__(self, name)
+        self.a = a
+        self.b = b
+
+    def sample(self):
+        self.value = np.random.uniform(self.a, self.b)
+        return(self.value)
+
+
+class Normal(DistParam):
     mu = Property1("mu")
     sigma = Property1("sigma")
 
     def __init__(self, name, mu=0, sigma=0.1, lims=[-1, 1]):
-
-        self.type = "Dist"
-        self.name = name
+        
+        DistParam.__init__(self, name)
         self.mu = mu
         self.sigma = sigma
         self.lims = lims
-        self.value = None
 
+    def set_func_args(self):
+        self.dist.set_func_args(self.get_params())
+        # specific for normal dist:
+        low_lim, up_lim = self.calc_limits()
+        self.dist.set_limits(low_lim, up_lim)
+
+    def calc_limits(self):
+        mu = getattr(self, "mu")
+        sigma = getattr(self, "sigma")
+        low_lim = mu+min(-sigma, self.lims[0])
+        up_lim = mu+max(sigma, self.lims[1])
+
+        # low_lim = self.params["mu"]-max(-self.params["sigma"], self.lims[0])
+        # up_lim = self.params["mu"]+max(self.params["sigma"], self.lims[1])
+        return(low_lim, up_lim)
+
+    def set_func_arg(self, param_name):
+        '''Use descriptor to set func args'''
+        # print("self.params")
+        # print(self.params)
+        self.dist.set_func_arg(param_name, getattr(self, param_name))
+    
     def preproc(self):
         '''all access to properties here'''
-        self.low_lim, self.up_lim = self.lims
-        
-        self.low_lim += self.mu
-        self.up_lim += self.mu
+                
+        low_lim, up_lim = self.calc_limits()
 
         # normal distribution here:
-        self.norm_density = lambda x: (1/(np.sqrt(2*np.pi)*self.sigma))*np.exp(-((x-self.mu)/self.sigma)**2/2)
+        self.f = lambda x , mu, sigma: (1/(np.sqrt(2*np.pi)*sigma))*np.exp(-((x-mu)/sigma)**2/2)
     
-        ar = ARDist(self.low_lim, self.up_lim, self.norm_density)
-        self.sampler = lambda n: ar.sample_n(n)
-        self.M = ar.M
+        # use getattr to access parameters:
+        fargs = self.get_params()
+
+        self.dist = ARDistSimple(low_lim, up_lim,
+                                 self.f, fargs=fargs)
+        # self.set_func_args(self.params)
         
-    # def sampler(self, n):
-    #     for mu1 in self.mu:
-    #         pass
-    #         # TODO
+    def sample(self):
+        if not hasattr(self, "dist"):
+            self.preproc()
+        if self.dist.f.keywords != self.get_params():
+            self.set_func_args()
 
-    def sample_n(self, n):
-        self.preproc()
-        return(self.sampler(n))
+        self.value = self.dist.sample()
+        return(self.value)
 
 
-class SimpleRejection():
+class RejectionSampler():
     '''
-    - ``params`` -- dict with sampler (distribution) for each
+    - ``model`` -- list with sampler (distribution) for each
     param.
 
-    - ``conditions`` -- return bool array for
-    all params.
-    ex: conditions({'a': values, 'b': values, ...})
-       :-> array[bool]
+    - ``conditions`` -- strings like "$aa > $bb" where `aa`
+    and `bb` are dist names.
     '''
-    def __init__(self, params, conditions):
+    def __init__(self, model, conditions):
         # conditions(params)-> array[bool]
-        self.conditions = conditions
-        self.params = params
 
+        self.conditions = [Template(cond) for cond in conditions]
+        self.model = model
+        
+        # order to sample which:
+        self.order = None
+
+        # used values that will not been cleared after
+        # each sample step:
+        self.existing_values = [dist.name for dist in self.model
+                                if dist.value is not None]
         # for access storage:
-        self.props = Property("_simple_rejection_")
-        self.storage = self.props.storage
+        # self.props = Property("_simple_rejection_")
+        # self.storage = self.props.storage
 
-    def run(self, n):
-        samples = {}
-        result = np.array([])
+    def run_n(self, n):
+        # init:
+        samples = self.collect_samples()
+        for var in samples:
+            samples[var] = []
+        print_step = 10
+        for i in range(n):
+            if i % print_step == 0:
+                print("step ", i)
+                model = self.model
+                # print("%s.value=%s" % (model[0].name, model[0].value))
+                # print("%s.value=%s" % (model[1].name, model[1].value))
+                # print("%s.params=%s" % (model[0].name, model[0].params))
+                # print("%s.params=%s" % (model[1].name, model[1].params))
+                # test specific:
+                # assert model[0].value == model[1].params["mu"].value
+            sample = self.run()
+            for var in sample:
+                samples[var].append(sample[var])
+        return(samples)
+
+    def run(self, dbg=False):
+        '''
+        aa = sm.Normal("aa", mu=3)
+        bb = sm.Normal("bb", mu=aa)
+
+        m = sm.SimpleRejection({aa, bb},{})
+        m.run()
+        '''
+        order = self.order
+        if order is None:
+            # FOR order conditioned:
+            order = self.check_order()
+            self.order = order
+            # END FOR
+            
+            # result from previous:
+            samples = self.collect_samples()
+
+            # FOR check conditions:
+            cond = all([eval(cond.substitute(samples))
+                        for cond in self.conditions])
+            if cond:
+                return(samples)
+            # END FOR
+
+        # clear previously generated:
+        for dist in self.model:
+            # except what been defined in initialization:
+            if dist.name not in self.existing_values:
+                dist.value = None
+        # for dist in self.model:
+        #     print(dist.name)
+        #     print(dist.get_params())
+        if dbg:
+            print("order:")
+            print(order)
+
+        # FOR fixed order sampling:
+        # now, when known what order of samples
+        # is, it can be used to sample ordinary:
+        cond = False
+        while(not cond):
+            for dist_name in order:
+                dist = self.find_dist(dist_name)
+                dist.sample()
+            samples = self.collect_samples()
+            # print(samples)
+            model = self.model
+            if dbg:
+                print("%s.value=%s" % (model[0].name, model[0].value))
+                print("%s.value=%s" % (model[1].name, model[1].value))
+                if hasattr(model[1], "dist"):
+                    print(model[1].dist.f(model[1].value))
+                    print(model[1].dist.f)
+                print("%s.params=%s" % (model[0].name, model[0].params))
+                print("%s.params=%s" % (model[1].name, model[1].params))
+                print()
+            cond = all([eval(cond.substitute(samples))
+                        for cond in self.conditions])
+        # END FOR
+    
+        return(samples)
+        
+    def collect_samples(self):
+        return(dict((dist.name, dist.value) for dist in self.model))
+
+    def find_dist(self, dist_name):
+        for dist in self.model:
+            if dist.name == dist_name:
+                return(dist)
+
+    def check_order(self):
+        '''Check all params availability, sample and
+        collect order of names'''
+
+        order = []
+
+        dists_check = [dist for dist in self.model
+                       if dist.value is None]
+        
+        while(len(dists_check) > 0):
+            dists_check = [dist for dist in self.model
+                           if dist.value is None]
+            dists = [dist for dist in dists_check
+                     if dist.all_params_ready()]
+            if len(dists) == 0 and len(dists_check) != 0:
+                raise(Exception("exist dist with None value "
+                                + " but not ready for sample"))
+            for dist in dists:
+                dist.sample()
+                if dist.name not in order:
+                    order.append(dist.name)
+        return(order)
+
+    def other():
         m = 0
-        # TODO:
-        # order conditioned
-        # dist object like param for dist (hierarchy)
-
         # adjustment since count of samples is random:
         while(m < n):
 
@@ -575,6 +790,101 @@ class SimpleRejection():
 
         return(result[:n])
 
+
+def test_rsampler_wm():
+    '''weight and measurement'''
+    guess = 8.5
+    aa = Uniform("aa", a=0, b=10)
+    bb = Uniform("bb", a=0, b=3)
+    wg = Normal("wg", mu=aa, sigma=bb)
+    w = Normal("w", mu=guess, sigma=1)
+    m = Normal("m", mu=w, sigma=0.75)
+    sampler = RejectionSampler([aa, bb, wg, w, m],
+                               ["abs($wg - $w) <= 0.3",
+                                "abs($m-9.5) <= 0.4"])
+    result = sampler.run_n(1240)
+    # print("result:")
+    # print(result)
+    # print("bb.calc_limits:")
+    # print(bb.calc_limits())
+    xs = result['aa']
+    xs1 = result['bb']
+    plot_hist(xs)
+    plot_hist(xs1)
+
+
+def test_rsampler_hist1():
+
+    aa = Uniform("aa", a=0, b=7)
+    bb = Normal("bb", mu=aa, sigma=0.1, lims=[-3, 3])
+    m = RejectionSampler([aa, bb], ["$bb >= 4"])  # "$bb >= 4"
+    result = m.run_n(1240)
+    # print("result:")
+    # print(result)
+    print("bb.calc_limits:")
+    print(bb.calc_limits())
+    xs = result['aa']
+    xs1 = result['bb']
+    plot_hist(xs)
+    plot_hist(xs1)
+
+
+def test_rsampler_hist():
+
+    aa = Normal("aa", mu=3, sigma=1, lims=[-3, 3])
+    bb = Normal("bb", mu=aa, sigma=1, lims=[-3, 3])
+    m = RejectionSampler([aa, bb], ["$bb >= 4"])  # "$bb >= 4"
+    result = m.run_n(2240)
+    # print("result:")
+    # print(result)
+    print("aa.calc_limits:")
+    print(aa.calc_limits())
+    print("bb.calc_limits:")
+    print(bb.calc_limits())
+    xs = result['aa']
+    xs1 = result['bb']
+    plot_hist(xs)
+    plot_hist(xs1)
+
+
+def plot_hist(xs):
+    bins_count = 70
+    fig, ax = plt.subplots()
+    
+    v, b, p = ax.hist(xs, bins_count,  # normed=True, # density=True,
+                      stacked=True)
+    # xs1 = np.linspace(dist.a, dist.b, N)
+    # ax.plot(xs1, (f(xs1, mu, sigma)/dist.M)*max(v))
+    plt.show()
+
+
+def test_rsampler_cond():
+    aa = Normal("aa", mu=3)
+    bb = Normal("bb", mu=aa)
+    m = RejectionSampler({aa, bb}, ["$aa > 3.1", "$bb > 3.1"])
+    result = m.run()
+    print("test0 result:")
+    print(result)
+    print("m.order:")
+    print(m.order)
+    print("test1 result:")
+    result = m.run()
+    print(result)
+
+
+def test_rsampler():
+    aa = Normal("aa", mu=3)
+    bb = Normal("bb", mu=aa)
+    m = RejectionSampler({aa, bb}, {})
+    result = m.run()
+    print("test0 result:")
+    print(result)
+    print("m.order:")
+    print(m.order)
+    print("test1 result:")
+    result = m.run()
+    print(result)
+    
 
 def test_ardist_simple():
     import matplotlib.pyplot as plt
@@ -641,10 +951,10 @@ def test_ardist():
 
 def test_ardist_norm():
     import matplotlib.pyplot as plt
-
+    
     N = 3000
     
-    mu = 10*np.zeros(N)
+    mu = 10*np.ones(N)
     sigma = 0.1*np.ones(N)
     
     f = lambda x, mu, sigma: (1/(np.sqrt(2*np.pi)*sigma))*np.exp(-((x-mu)/sigma)**2/2)
@@ -667,7 +977,12 @@ if __name__ == "__main__":
     # test_ardist_norm_simple()
     # test_ardist_simple()
     # test_ardist()
-    test_ardist_norm()
+    # test_ardist_norm()
+    # test_rsampler()
+    # test_rsampler_cond()
+    # test_rsampler_hist()
+    # test_rsampler_hist1()
+    test_rsampler_wm()
     '''
     mu = 10*np.zeros(3)
     sigma = 0.1*np.ones(3)
