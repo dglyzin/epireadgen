@@ -542,6 +542,11 @@ class DistParam():
         return(dict((param_name, getattr(self, param_name))
                     for param_name in self.params))
 
+    def p(self):
+        # TODO
+        if self.value is None:
+            return(1)
+        
     def sample_n(self, n):
         return([self.sample() for i in range(n)])
 
