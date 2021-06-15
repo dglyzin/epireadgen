@@ -7,8 +7,15 @@ import numpy as np
 import sim2
 
 import matplotlib
-matplotlib.use('GTK3Agg')
+# matplotlib.use('GTK3Agg')
 import matplotlib.pyplot as plt
+
+from string import Template
+
+
+# from progresses.progress_cmd import ProgressCmd
+import progresses.progress_cmd as progress_cmd
+ProgressCmd = progress_cmd.ProgressCmd
 
 
 class BayesNet():
@@ -36,22 +43,42 @@ class BayesNet():
                                          self.nodes))
                              for var in self.sorted_vars]
         self.dnodes = dict(zip(self.sorted_vars, self.sorted_nodes))
+        
+    def get_labels(self, events):
+        return(dict([(var, list(map(str, self.dnodes[var].enumerate_support(events))))
+                     for var in self.dnodes
+                     if hasattr(self.dnodes[var], 'enumerate_support')]))
+    
+    def init_samples(self, default=lambda var: None):
+        return(dict([(var, default(var)) for var in self.sorted_vars]))
 
-    def prior_sample(self):
-        samples = dict([(var, None) for var in self.sorted_vars])
+    def prior_sample(self, gevents=None):
+        '''
+        gevents like "a==0 and b>=0" supported only if there is 
+        no more then one contunues dist
+        otherwise {"a":0, b:[1, 2, 3]} must be used
+        '''
+
+        samples = self.init_samples()
         for var in self.sorted_vars:
             dnode = self.dnodes[var]
+            # print("dnode:")
+            # print(dnode)
+            # print(dnode.var)
             
             # dnode.set_params(samples)
 
-            for events, param_name in dnode.params:
-                assert type(events) == str
-                # ex: p(X|Y=0) = p(\Sigma).sample()
-                dnode.set(events, self.samples[param_name])
-                # p(X|Y!=0) = norm(1-p(\Sigma).sample())
-                size = len(dnode("not " + events))
-                dnode.set("not "+events, (1 - self.samples[param_name])/size)
-            samples[var] = dnode.sample()
+            dnode_pnames = dnode.reset_params(samples)
+            # print("dnode_pnames:")
+            # print(dnode_pnames)
+
+            pevents = dict([
+                (pvar, samples[pvar][self.dnodes[pvar].vars.index(pvar)])
+                for pvar in dnode.parents if pvar not in dnode_pnames])
+            # print("pevents:")
+            # print(pevents)
+            samples[var] = dnode.sample(update(gevents, pevents))
+            
         return(samples)
 
     def get_node(self, var):
@@ -170,10 +197,26 @@ class Probability():
         # print(values)
         self.df.loc[values, :] = ps
 
+    def reset_params(self, samples):
+        dnode = self
+
+        dnode_pnames = []
+        for events, param_name in dnode.params:
+            assert type(events) == str
+
+            dnode_pnames.append(param_name)
+
+            # ex: p(X|Y=0) = p(\Sigma).sample()
+            dnode.set(events, samples[param_name])
+            # p(X|Y!=0) = norm(1-p(\Sigma).sample())
+            size = len(dnode("not " + events))
+            dnode.set("not "+events, (1 - samples[param_name])/size)
+        return(dnode_pnames)
+
     def get_var_values(self, var):
         return(self.support[self.vars.index(var)])
 
-    def get_values(self, events):
+    def get_values(self, events, use_index=False):
         # if events like "X>0.1 & Y==0":
         if events is None:
             return(self.df.index)
@@ -182,14 +225,49 @@ class Probability():
             return(self.df.query(events).index)
             
         # if events like {"X": 0.1, "Y": 0}
+        if use_index:
+            values = [(events[var] if type(events[var]) == list else [events[var]])
+                      if var in events
+                      else self.support[idx]
+                      for idx, var in enumerate(self.vars)]
+            index = pd.MultiIndex.from_product(values,
+                                               names=self.vars)
+            # >>> p.df.loc[i, :] 
+            return(index)
+            # index = self.df.loc[tuple(values), :].index
+            #  if slice not in values:
+            # [[0], [1], [0]]
+
+        
         values = [events[var] if var in events
                   else slice(None)
                   for idx, var in enumerate(self.vars)]
+            
+        # print("\nindex:")
+        # print(index)
+        # print("tuple(values)")
+        # print(tuple(values))
+        # print("self.df index:")
+        # print(self.df.loc[index, :])
+        # print("self.df values")
+        # print(self.df.loc[tuple(values), :])
         return(tuple(values))
-
+        
     def sample(self, events=None):
         val = self(events).to_numpy()
-        idx = self.get_values(events)
+        idx = self.get_values(events, use_index=True)
+        '''
+        print(self)
+        print("events:")
+        print(events)
+        print("idx:")
+        print(idx)
+        print("")
+        print(self.df.loc[idx, :])
+        print(self.df.loc[idx, :].index)
+        print("val.flatten():")
+        print(val.flatten())
+        '''
         edist = sim2.Empirical(idx.to_numpy(), val.flatten())
         return(edist.sample())
 
@@ -204,15 +282,78 @@ class Probability():
         # ed.log_prob(torch.tensor((0.3, 0., 0.)))
 
     def enumerate_support(self, events):
-        return(self.get_values(events).to_numpy())
+        return(self.get_values(events, use_index=True).to_numpy())
+
+    def get_support_index(self, sample, events, var_only=False):
+        '''
+        Return support index of sample for given events
+        
+        - ``events`` -- str or dict with events, must been
+        same as had been in `sample = dist.sample(events)`
+
+        - ``sample`` -- from `dist.sample(events)`
+        (index of `self.df` table)
+        
+        - ``var_only`` -- for plot. if true return index only
+        in accrdence with self.var range, otherwise return
+        in accordence to events.
+
+        Example:
+        p_x_y = sim1.CondProb("X", parents=["Y"],
+                              support=[[0, 1], [0, 1]])
+        p_x_y.set({"Y": 0}, [0.1, 0.9])
+        p_x_y.set({"Y": 1}, [0.5, 0.5])
+
+        p_x_y
+              0
+        X Y     
+        0 0  0.1
+          1  0.5
+        1 0  0.9
+          1  0.5
+
+        sample = p_x_y.sample()
+        # (0, 1)
+
+        p_x_y.get_support_index(sample, None)
+        # 1
+
+        p_x_y.get_support_index(sample, None, True)
+        # 0
+
+        p_x_y.get_support_index((1,1), None)
+        # 3
+
+        p_x_y.get_support_index((1,1), None, True)
+        # 1
+        '''
+        if var_only:
+            idx = self.vars.index(self.var)
+            return(self.support[idx].index(sample[idx]))
+
+        support = list(self.enumerate_support(events))
+        return(support.index(sample))
+
+    def get_support_val(self, sample, events):
+        '''
+        >>> get_support_val((0, 1, 0), {"X":0, Y:[0,1]})
+        # return {"X":0, "Y":1, "Z":0}
+
+        >>> get_support_val((0, 1, 0), {Y:[0,1]})
+        # return {"X":0, "Y":1, "Z": 0}
+        Not used, intended for extract sample names
+        (for prior_sample update events from sample)
+        '''
+        vals = self.get_values(events, use_index=True)
+        return(dict(zip(vals.names, sample)))
 
 
 class CondProb(Probability):
-    def __init__(self, var, parents=[], support=[[0, 1]]*2):
+    def __init__(self, var, parents=[], support=[[0, 1]]*2, params=[]):
         self.var = var
         self.parents = parents
         Probability.__init__(self, vars=[var]+parents,
-                             support=support)
+                             support=support, params=params)
         
 
 def enumeration_ask(bn, var, events):
@@ -255,6 +396,13 @@ def enumeration_all(bn, vars, events):
         return(p(update({y: events[y]}, parents(p, events))).to_numpy()
                * enumeration_all(bn, rest, events))
     else:
+        '''
+        print("sum")
+        print(p.get_var_values(y))
+        print([(p(update({y: y_val}, parents(p, events))).to_numpy(),
+               enumeration_all(bn, rest, update({y: y_val}, events)))
+               for y_val in p.get_var_values(y)])
+        '''
         return(sum([p(update({y: y_val}, parents(p, events))).to_numpy()
                     * enumeration_all(bn, rest, update({y: y_val}, events))
                     for y_val in p.get_var_values(y)]))
@@ -267,8 +415,13 @@ def parents(p, events):
 
 
 def update(d1, d2):
-    return(dict([(key, d1[key]) for key in d1]
-                + [(key, d2[key]) for key in d2]))
+    if type(d1) == dict:
+        return(dict([(key, d1[key]) for key in d1]
+                    + [(key, d2[key]) for key in d2]))
+    elif type(d1) == str and type(d2) == dict:
+        return(d1 + reduce(
+            lambda acc, x: " and " + x[0] + "==" + str(x[1]) + acc,
+            d2.items(), ""))
 
 
 def enumeration_join(p, var, events={}):
@@ -288,12 +441,53 @@ def enumeration_join(p, var, events={}):
     # return(result)
 
 
-def make_dist(pyro_or_torch_dist, var, parents=[]):
-    dist = pyro_or_torch_dist
-    dist.var = var
-    dist.parents = parents
-    dist.params = []
-    return(dist)
+def make_dist(pyro_or_torch_dist, var, *args, parents=[], params=[]):
+    class ContDist(pyro_or_torch_dist):
+        def __init__(self, var, *args, parents=[], params=[]):
+            pyro_or_torch_dist.__init__(self, *args)
+            self.__name__ = pyro_or_torch_dist.__name__
+            self.var = var
+            self.parents = parents
+            self.params = params
+            
+        def reset_params(self, samples):
+            '''
+            Support only for continues parents, whose names
+            is `torch.tensor`
+            '''
+            # current_params = dict([(pname, getattr(self, pname))
+            #                         for pname in self.arg_constraints])
+            u_params = dict([(param_name, samples[param_parent_name])
+                             for param_name, param_parent_name in self.params])
+            dnode_pnames = [param_parent_name
+                            for param_name, param_parent_name in self.params]
+            
+            # print("u_params:")
+            # print(u_params)
+            # current_params.update(u_params)
+        
+            for pname in u_params:
+                pvalue = u_params[pname]
+                setattr(self, pname, torch.tensor(pvalue))
+                
+            return(dnode_pnames)
+
+        def sample(self, events):
+            # TODO: fix for multiply continues dist
+            return(np.array(pyro_or_torch_dist.sample(self)))
+        '''
+        def sample(self, *args, **kwargs):
+            return(np.array(pyro_or_torch_dist.sample(self, *args, **kwargs)))
+        '''
+
+        def get_support_index(self, sample, events, var_only=False):
+            return(sample)
+
+    # dist = pyro_or_torch_dist
+    # dist.var = var
+    # dist.parents = parents
+    # dist.params = []
+    return(ContDist(var, *args, parents=parents, params=params))
 
 
 def plot_results(dist, events, N=30, count=300):
@@ -330,8 +524,60 @@ def plot_results(dist, events, N=30, count=300):
     plt.show()
 
 
-def rejection_sampling():
-    pass
+def plot_results1(vars, isamples):
+    for var in vars:
+        print("var:")
+        print(var)
+        var_data = np.array(isamples[var]).astype(np.float)
+        # print(var_data)
+        print("probs of var (bin=2):")
+        var_data = torch.histc(torch.tensor(var_data), 2) 
+        print(var_data/var_data.sum())
+
+        plt.hist(isamples[var], 30,  # density=True,
+                 stacked=True
+                 # , rwidth=0.1, label=label
+                 )
+        plt.show()
+
+    # plt.legend(label)
+
+
+def rejection_sampling(net, N, cond, cprogress=ProgressCmd):
+    progress = cprogress(N)
+    events = {}
+
+    samples = net.init_samples(default=lambda var: [])
+    indexes = net.init_samples(default=lambda var: [])
+
+    for step in range(N):
+        sample = net.prior_sample(events)
+
+        if cond is not None:
+            if not check_cond(sample, cond):
+                continue
+
+        for var in samples:
+            samples[var].append(sample[var])
+
+            # collect indexes (int) instead of multiIndex (tuples): 
+            indexes[var].append(net.dnodes[var]
+                                .get_support_index(sample[var], events,
+                                                   var_only=True))
+        progress.succ(step)
+    progress.print_end()
+    # labels = net.get_labels(events)
+    labels = None
+    return(samples, indexes, labels)
+
+
+def check_cond(samples, cond):
+    cond = Template(cond)
+    # print("samples:")
+    # print(samples)
+    # print("cond:")
+    # print(cond.substitute(samples))
+    return(eval(cond.substitute(samples)))
 
 
 def test_bayes_EM():
@@ -573,7 +819,6 @@ def test_enumeration_ask1():
 
     print("p(Z=0)")
     result = enumeration_all(net,  ["Z", "Y", "X"], {"Z": 0})
-    
     print('enumeration_all(net, ["Z", "Y", "X"], {"Z": 0}):')
     print(result)
     print("===========================")
@@ -583,6 +828,10 @@ def test_enumeration_ask1():
     print(result)
 
     print("\naccurate_test0 p(X=0, Z=0):")
+    print(p_x_y({"X": 0})*p_y_z({"Z": 0}))
+    print(p_x_y({"X": 0})*p_z({"Z": 0}))
+    print(p_z({"Z": 0}))
+          
     print((p_x_y({"X": 0})*p_y_z({"Z": 0})*p_z({"Z": 0})).sum())
     print("accurate_test0.1 p(X=0, Z=0):")
     print(p_x_y({"X": 0, "Y": 0})*p_y_z({"Y": 0, "Z": 0})*p_z({"Z": 0})
@@ -712,11 +961,14 @@ def test_discrete_simple(events="Y==0"):
     
 
 def test_prior():
-    p = make_dist(torch.Uniform(0, 1), "a")
-    p0 = CondProb("Bag", parents=[], support=[[0, 1]],
+    p = make_dist(dist.Uniform, "a", 0, 1)
+
+    # p = make_dist(dist.Uniform(0, 1), "a")
+    p0 = CondProb("Bag", parents=["a"], support=[[0, 1], ["a"]],
                   params=[("Bag==0", "a")])
     
-    p1 = CondProb("Color", parents=["Bag"], support=[["red", "green"]])
+    p1 = CondProb("Color", parents=["Bag"],
+                  support=[["red", "green"], [0, 1]])
     p1.set({"Bag": 0}, [0.1, 0.5])
     p1.set({"Bag": 1}, [0.9, 0.5])
 
@@ -728,13 +980,126 @@ def test_prior():
     print(list(map(lambda node: node.var, net.sorted_nodes)))
     # ['T1', 'X1', 'X2', 'X2', 'Y1', 'Y2', 'Z1', 'Z2', 'Z2']
     samples = net.prior_sample()
-    print("samples:")
+    print("net.prior_sample():")
     print(samples)
+    print("p0:")
+    print(p0)
+
+    print('net.prior_sample():')
+    samples = net.prior_sample()
+    print(samples)
+
+    print('net.prior_sample("Bag==0"):')
+    samples = net.prior_sample("Bag==0")
+    print(samples)
+        
+
+def test_rejection_sampler(N=3, cond="$a>=0.7"):
+    '''
+    Model:
+    {a| a=Uniform(0, 1)}
+      ->{Bag| [p(Bug=0)=1-a, p(Bug=1)=a]}
+       ->{Color| [p(Color|"Bag": 0)=[0.1, 0.9],
+                  p(Color|"Bag": 1) = [0.5, 0.5]]}
+    Ask what p(X|cond) will be for X is some of [a, Bag, Color]
+  
+    Requirement:
+    Make shure
+    All children must use parents samples result.
+    So if Bag=(bag_number, 'a'), Color must be ('green'/'red', bag_number)
+  
+    Tests:
+
+    cond="$Bag==(0, 'a') and $Color==('green', 0)
+    cond="$a>=0.7"    
+    cond = "True"
+    '''
+    
+    p = make_dist(dist.Uniform, "a", 0, 1)
+    # p = make_dist(dist.Uniform(0, 1), "a")
+    
+    # P(Bag==1) = a:
+    p0 = CondProb("Bag", parents=["a"], support=[[0, 1], ["a"]],
+                  params=[("Bag==1", "a")])
+    
+    # P(Color|Bag):
+    p1 = CondProb("Color", parents=["Bag"],
+                  support=[["red", "green"], [0, 1]])
+    p1.set({"Bag": 0}, [0.1, 0.9])
+    p1.set({"Bag": 1}, [0.5, 0.5])
+
+    net = BayesNet([p, p0, p1])
+
+    print("net.sorted_vars:")
+    print(net.sorted_vars)
+
+    print('rejection_sampling(net, %s)' % cond)
+    samples, indexes, labels = rejection_sampling(net, N,
+                                                  cond=cond)
+    print("len(samples)")
+    print(len(samples['Bag']))
+    # print(indexes)
+    # print(labels)
+
+    plot_results1(net.sorted_vars, indexes)
+
+
+def test_rejection_sampler1(N=3, cond="$a>=0.7"):
+    '''
+    Model:
+    {a| a=Uniform(0, 1)}
+     ->{b| b=Uniform(a, 1)}
+      ->{Bag| [p(Bug=0)=1-b, p(Bug=1)=b]}
+       ->{Color| [p(Color|"Bag": 0)=[0.1, 0.9],
+                  p(Color|"Bag": 1) = [0.5, 0.5]]}
+    Ask what p(X|cond) will be for X is some of [a, b, Bag, Color]
+
+    Requirement:
+    Make shure
+    All children must use parents smaples result.
+    So if Bag=(bag_number, 'a'), Color must be ('green'/'red', bag_number)
+
+    Tests:
+
+    cond="$Bag==(0, 'a') and $Color==('green', 0)
+    cond="$a>=0.7"    
+    cond = "True"
+    '''
+    
+    p = make_dist(dist.Uniform, "a", 0, 1)
+    # p = make_dist(dist.Uniform(0, 1), "a")
+    pp = make_dist(dist.Uniform, "b", 0, 1,
+                   parents=["a"], params=[("low", "a")])
+
+    # P(Bag==1) = b (and P(Bag!=1) = 1-b):
+    p0 = CondProb("Bag", parents=["b"], support=[[0, 1], ["b"]],
+                  params=[("Bag==1", "b")])
+    
+    # P(Color|Bag):
+    p1 = CondProb("Color", parents=["Bag"],
+                  support=[["red", "green"], [0, 1]])
+    p1.set({"Bag": 0}, [0.1, 0.9])
+    p1.set({"Bag": 1}, [0.5, 0.5])
+
+    net = BayesNet([p, p0, p1, pp])
+
+    print('rejection_sampling(net, %s)' % cond)
+    samples, indexes, labels = rejection_sampling(net, N,
+                                                  cond=cond)
+    print("len(samples):")
+    print(len(samples["Bag"]))
+    # print(samples)
+    # print(indexes)
+    # print(labels)
+    plot_results1(net.sorted_vars, indexes)
 
 
 if __name__ == "__main__":
 
-    test_discrete_simple(events=None)
+    test_rejection_sampler1(N=700, cond="$a>=0.0")
+    # test_rejection_sampler(N=700, cond="$a>=0.7")
+    # test_prior()
+    # test_discrete_simple(events=None)
     # test_discrete_simple(events="Z1+Z2==1")
     # test_enumeration_ask2()
     # test_enumeration_ask1()
