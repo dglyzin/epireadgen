@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import progresses.progress_cmd as progress_cmd
 ProgressCmd = progress_cmd.ProgressCmd
 
+
+# FOR model:
 def model():
     p = pyro.sample("p", pdist.Uniform(0, 1))
     a = pyro.sample("a", pdist.Categorical(torch.tensor([p, 1-p])))
@@ -20,8 +22,10 @@ def fcond(trace):
     print(trace.nodes)
     
     return(False)
+# END FOR
 
 
+# FOR model1:
 def model1():
     '''
     Model:
@@ -41,8 +45,10 @@ def model1():
 
 def m1_fcond(trace):
     return(trace.nodes['p']['value'] >= 0.7)
+# END FOR
 
 
+# FOR model2:
 def model2():
     '''
     Model:
@@ -69,6 +75,36 @@ def model2():
 
 def m2_fcond(trace):
     return(trace.nodes['a']['value'] >= 0.0)
+# END FOR
+
+
+# FOR model3:
+def model3(sigm_x=0.1, sigm_y=0.1, mu_z=0.0, sigm_z=0.1):
+    '''
+    Model:
+    {z| Normal(0, 0.1)}
+     ->{y| Normal(z, 0.1)}
+      ->{x| Normal(y, 0.1) and x<0.5}
+    Ask what p(X|cond) will be for X is some of [a, b, Bag, Color]
+    '''
+    z = pyro.sample("z", pdist.Normal(mu_z, sigm_z))
+    y = pyro.sample("y", pdist.Normal(z, sigm_y))
+    x = pyro.sample("x", pdist.Normal(y, sigm_x))
+    return(x)
+
+
+def m3_fcond0(trace):
+    return(trace.nodes['x']['value'] <= 0.5)
+
+
+def m3_fcond1(trace):
+    return(trace.nodes['x']['value'] >= 0.5)
+
+
+def m3_fcond2(trace):
+    return(trace.nodes['x']['value'] <= 0.5
+           and trace.nodes['z']['value'] <= 0.5)
+# END FOR
 
 
 class Cond(pyro.poutine.trace_messenger.TraceMessenger):
@@ -87,12 +123,13 @@ class Cond(pyro.poutine.trace_messenger.TraceMessenger):
         return pyro.poutine.trace_messenger.TraceMessenger.__exit__(self, *args, **kwargs)
 
 
-def rejection_sampling(model, fcondition, N=3, cprogress=ProgressCmd):
+def rejection_sampling(model, model_kwargs, fcondition,
+                       N=3, cprogress=ProgressCmd):
     progress = cprogress(N)
     samples = []
     for step in range(N):
         with Cond(fcondition) as cstorage:
-            Cond(fcondition)(model).get_trace()
+            Cond(fcondition)(model).get_trace(**model_kwargs)
         if cstorage.trace.nodes['cond']['value']:
             samples.append(cstorage.trace.copy())
         progress.succ(step)
@@ -151,7 +188,7 @@ def test_m1_1(N=3):
 
 
 def test_rejection_sampler(N=3):
-    samples = rejection_sampling(model1, m1_fcond, N)
+    samples = rejection_sampling(model1, {}, m1_fcond, N)
     print([sample.nodes['cond']['value'] for sample in samples])
     print([sample.nodes['Color']['value'] for sample in samples])
 
@@ -160,13 +197,57 @@ def test_rejection_sampler1(model=model1, fcondition=m1_fcond, N=3):
 
     '''with plot and DataFrame'''
 
-    samples = rejection_sampling(model, fcondition, N)
+    samples = rejection_sampling(model, {}, fcondition, N)
     df = make_dataFrame(samples)
     plot_results(df)
     return(df)
 
 
+def test_rejection_sampler2(model=model3, model_kwargs={},
+                            fcondition=m3_fcond0, N=3):
+
+    '''with plot and DataFrame'''
+
+    samples = rejection_sampling(model, model_kwargs, fcondition, N)
+
+    print("len(samples): ", len(samples))
+    fsample, rsamples = samples[0], samples[1:]
+
+    # init:
+    _vars = dict([(var, []) for var in fsample.nodes])
+
+    for sample in rsamples:
+        for var in fsample.nodes:
+            _vars[var].append(sample.nodes[var]["value"])
+
+    for var in _vars:
+        print(var)
+        
+        plt.hist(_vars[var], 30,  # density=True,
+                 stacked=True
+                 # , rwidth=0.1, label=label
+             )
+        plt.show()
+        
+
 if __name__ == "__main__":
-    test_rejection_sampler1(model=model2, fcondition=m2_fcond, N=700)
-    # test_rejection_sampler1(model=model1, fcondition=m1_fcond, N=700)
+    # test_rejection_sampler2(model=model3, fcondition=m3_fcond0, N=1700)
+    # 1698/1700 ~ 0.9988
+    # accurate: 0.9980537912897127
+
+    # test_rejection_sampler2(model=model3, fcondition=m3_fcond1, N=17000)
+    # 36/17000 ~ 0.0020588
+    # accurate: 0.0019462084167189077
+
+    '''
+    test_rejection_sampler2(
+        model=model3,
+        model_kwargs={"sigm_x": 0.1, "sigm_y": 0.1, "mu_z": 0.5},
+        fcondition=m3_fcond2, N=1700)
+    # 581/1700 ~ 0.34176
+    # accurate: 0.3746040905409271
+    '''
+
+    # test_rejection_sampler1(model=model2, fcondition=m2_fcond, N=700)
+    test_rejection_sampler1(model=model1, fcondition=m1_fcond, N=700)
     # test_m1_1()
