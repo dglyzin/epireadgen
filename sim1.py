@@ -1,10 +1,18 @@
-import torch
-import torch.distributions as dist
+try:
+    import torch
+    import torch.distributions as dist
+    from torch import tensor
+except ModuleNotFoundError:
+    print("WORNING: torch not found")
 
 import pandas as pd
 from functools import reduce
 import numpy as np
-import sim2
+
+try:
+    import sim2
+except ModuleNotFoundError:
+    print("WORNING: sim2.py ignored")
 
 import matplotlib
 # matplotlib.use('GTK3Agg')
@@ -50,6 +58,7 @@ class BayesNet():
                      if hasattr(self.dnodes[var], 'enumerate_support')]))
     
     def init_samples(self, default=lambda var: None):
+        # just return empty dict
         return(dict([(var, default(var)) for var in self.sorted_vars]))
 
     def prior_sample(self, gevents=None):
@@ -58,8 +67,10 @@ class BayesNet():
         no more then one contunues dist
         otherwise {"a":0, b:[1, 2, 3]} must be used
         '''
-
+        
+        # init samples with None (like {"a": None}):
         samples = self.init_samples()
+
         for var in self.sorted_vars:
             dnode = self.dnodes[var]
             # print("dnode:")
@@ -68,6 +79,7 @@ class BayesNet():
             
             # dnode.set_params(samples)
 
+            # samples will be from previous setps:
             dnode_pnames = dnode.reset_params(samples)
             # print("dnode_pnames:")
             # print(dnode_pnames)
@@ -77,6 +89,8 @@ class BayesNet():
                 for pvar in dnode.parents if pvar not in dnode_pnames])
             # print("pevents:")
             # print(pevents)
+
+            # update sample value in samples:
             samples[var] = dnode.sample(update(gevents, pevents))
             
         return(samples)
@@ -441,10 +455,12 @@ def enumeration_join(p, var, events={}):
     # return(result)
 
 
-def make_dist(pyro_or_torch_dist, var, *args, parents=[], params=[]):
+def make_dist(pyro_or_torch_dist, var, *args,
+              parents=[], params=[], **kwgs):
     class ContDist(pyro_or_torch_dist):
-        def __init__(self, var, *args, parents=[], params=[]):
-            pyro_or_torch_dist.__init__(self, *args)
+        def __init__(self, var, *args, parents=[], params=[], **kwgs):
+            
+            pyro_or_torch_dist.__init__(self, *args, **kwgs)
             self.__name__ = pyro_or_torch_dist.__name__
             self.var = var
             self.parents = parents
@@ -468,13 +484,15 @@ def make_dist(pyro_or_torch_dist, var, *args, parents=[], params=[]):
         
             for pname in u_params:
                 pvalue = u_params[pname]
-                setattr(self, pname, torch.tensor(pvalue))
+                setattr(self, pname, pvalue)
+                # setattr(self, pname, torch.tensor(pvalue))
                 
             return(dnode_pnames)
 
         def sample(self, events):
             # TODO: fix for multiply continues dist
-            return(np.array(pyro_or_torch_dist.sample(self)))
+            return(pyro_or_torch_dist.sample(self))
+            # return(np.array(pyro_or_torch_dist.sample(self)))
         '''
         def sample(self, *args, **kwargs):
             return(np.array(pyro_or_torch_dist.sample(self, *args, **kwargs)))
@@ -487,7 +505,8 @@ def make_dist(pyro_or_torch_dist, var, *args, parents=[], params=[]):
     # dist.var = var
     # dist.parents = parents
     # dist.params = []
-    return(ContDist(var, *args, parents=parents, params=params))
+    return(ContDist(var, *args,
+                    parents=parents, params=params, **kwgs))
 
 
 def plot_results(dist, events, N=30, count=300):
@@ -552,7 +571,6 @@ def rejection_sampling(net, N, cond, cprogress=ProgressCmd):
 
     for step in range(N):
         sample = net.prior_sample(events)
-
         if cond is not None:
             if not check_cond(sample, cond):
                 continue
@@ -1094,9 +1112,90 @@ def test_rejection_sampler1(N=3, cond="$a>=0.7"):
     plot_results1(net.sorted_vars, indexes)
 
 
+def test_rejection_sampler2(N=3, cond="$x<0.5", sigm_x=0.1,
+                            sigm_y=0.1,  mu_z=0.0, sigm_z=0.1):
+    '''
+    {z| Normal(0, 0.1)}
+     ->{y| Normal(z, 0.1)}
+      ->{x| Normal(y, 0.1) and x<0.5}
+    '''
+
+    z = make_dist(dist.Normal, "z", mu_z, sigm_z)
+
+    # bellow mu_z used only for init
+    # subsequently z and y will be used instead:
+    y = make_dist(dist.Normal, "y", mu_z, sigm_y,
+                  parents=["z"], params=[("loc", "z")])
+    x = make_dist(dist.Normal, "x", mu_z, sigm_x,
+                  parents=["y"], params=[("loc", "y")])
+
+    net = BayesNet([x, y, z])
+    print('rejection_sampling(net, %s)' % cond)
+    
+    print("\ncond: ", cond)
+    samples, indexes, labels = rejection_sampling(net, N,
+                                                  cond=cond)
+    print("len(samples):")
+    print(len(samples["x"]))
+    plot_results1(net.sorted_vars, indexes)
+
+    
 if __name__ == "__main__":
 
-    test_rejection_sampler1(N=700, cond="$a>=0.0")
+    '''
+    {z| Normal(0, 0.1)}
+     ->{y| Normal(z, 0.1)}
+      ->{x| Normal(y, 0.1)}
+    '''
+    # test_rejection_sampler2(N=1700, cond="$x<=0.5",
+    #                         sigm_z=0.1, sigm_y=0.1, sigm_x=0.1)
+    # count of succ will be ~ 1695
+    # => P(x<=0.5) ~ 1695/1700 ~ 0.9971
+    # accurate: 0.9980537912897127
+
+    '''
+    {z| Normal(0, 1.0)}
+     ->{y| Normal(z, 1.0)}
+      ->{x| Normal(y, 1.0)}
+    '''
+    # test_rejection_sampler2(N=1700, cond="$x<=0.5",
+    #                         sigm_z=1.0, sigm_y=1.0, sigm_x=1.0)
+    # count of succ will be ~ 1069
+    # => P(x<=0.5) ~ 1069/1700 ~ 0.6288
+    # accurate: 0.6135849997754309
+
+    # test_rejection_sampler2(N=17000, cond="$x>=0.5",
+    #                         sigm_z=0.1, sigm_y=0.1, sigm_x=0.1)
+    # count of succ will be ~ 35
+    # => P(x>=0.5) ~ 35/17000 ~ 0.0020
+    # accurate: 0.0019462084167189077
+
+    '''
+    {z| Normal(0.5, 1.0)}
+     ->{y| Normal(z, 1.0)}
+      ->{x| Normal(y, 0.1)}
+    '''
+    test_rejection_sampler2(N=1700, cond="$x<0.5 and $z<0.5",
+                            sigm_x=0.1, sigm_y=1.0, mu_z=0.5, sigm_z=1.0)
+    # count of succ will be ~ 607
+    # => P(x>=0.5) ~ 607/1700 ~ 0.3571
+    # accurate: 0.3746040905409271
+
+    '''
+    {a| a=Uniform(0, 1)}
+     ->{b| b=Uniform(a, 1)}
+      ->{Bag| [p(Bug=0)=1-b, p(Bug=1)=b]}
+       ->{Color| [p(Color|"Bag": 0)=[0.1, 0.9],
+                  p(Color|"Bag": 1) = [0.5, 0.5]]}
+    '''
+    # test_rejection_sampler1(N=700, cond="$a>=0.0")
+   
+    '''
+    {a| a=Uniform(0, 1)}
+      ->{Bag| [p(Bug=0)=1-a, p(Bug=1)=a]}
+       ->{Color| [p(Color|"Bag": 0)=[0.1, 0.9],
+                  p(Color|"Bag": 1) = [0.5, 0.5]]}
+    '''
     # test_rejection_sampler(N=700, cond="$a>=0.7")
     # test_prior()
     # test_discrete_simple(events=None)

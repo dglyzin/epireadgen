@@ -1,0 +1,65 @@
+import sim1 as sm1
+import lsim1 as lsm1
+
+
+def forward(pt0, transition, emission, obs, fprev=None):
+
+    # init:
+    if fprev is None:
+        f_t1 = pt0().to_numpy()
+    else:
+        f_t1 = fprev
+        
+    # finish:
+    if len(obs) == 0:
+        return(f_t1)
+
+    ofirst, orest = obs[0], obs[1:]
+
+    pe_t1 = emission({"et": ofirst})
+    print("pe_t1:")
+    print(pe_t1)
+    print("sum:")
+    print(
+        sum([
+            transition({"xt1": xt1}).to_numpy() * f_t1[i] 
+            for i, xt1 in enumerate(transition.get_var_values("xt1"))]))
+    f_t = pe_t1.to_numpy() * sum([
+        transition({"xt1": xt1}).to_numpy() * f_t1[i] 
+        for i, xt1 in enumerate(transition.get_var_values("xt1"))])
+    print("f_t:")
+    print(f_t)
+
+    print("f_t norm:")
+    f_t = f_t/f_t.sum()
+    print(f_t)
+    return(forward(None, transition, emission, orest,
+                   fprev=f_t))
+    
+
+def test_forward():
+    pt0 = sm1.CondProb("xt", parents=[], support=[[0, 1]])
+    pt0.set({}, [0.5, 0.5])
+    print("pt0:")
+    print(pt0)
+
+    transition = sm1.CondProb("xt", parents=["xt1"],
+                              support=[[0, 1], [0, 1]])
+    transition.set({"xt1": 1}, [0.3, 0.7])
+    transition.set({"xt1": 0}, [0.7, 0.3])
+    print("transition:")
+    print(transition)
+    
+    emission = sm1.CondProb("et", parents=["xt"],
+                            support=[[0, 1], [0, 1]])
+    emission.set({"xt": 1}, [0.1, 0.9])
+    emission.set({"xt": 0}, [0.8, 0.2])
+    print("emission:")
+    print(emission)
+    
+    forward(pt0, transition, emission, [1, 1], None)
+
+
+if __name__ == "__main__":
+    
+    test_forward()

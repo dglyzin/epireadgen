@@ -107,6 +107,19 @@ def m3_fcond2(trace):
 # END FOR
 
 
+def model4():
+    x = pyro.sample("x", pdist.Normal(0, 1))
+    
+    # if obs = 0.2, p(x|y) will be around 0.2
+    # if obs = -0.2, p(x|y) will be around -0.2
+    # (if threshold==0.4):
+    y = pyro.sample("y", pdist.Normal(x, 0.1), obs=torch.tensor(-0.2))
+
+
+def m4_fcond0(trace):
+    return(True)
+
+
 class Cond(pyro.poutine.trace_messenger.TraceMessenger):
 
     '''Check conditions and add cond = True if succ'''
@@ -135,6 +148,41 @@ def rejection_sampling(model, model_kwargs, fcondition,
         progress.succ(step)
     progress.print_end()
     return(samples)
+
+
+def rejection_sampling1(model, model_kwargs, fcondition,
+                        N=3, cprogress=ProgressCmd, threshold=0):
+    '''rejection_sampling with use of score
+    for observing continues (like Normal == 0.1 or Uniform == 0.1)
+    
+    threshold == 0 is equal to p(cond)>Uniform[0, 1]
+    (p(cond) > exp(threshold)*Uniform[0, 1])
+    '''
+    
+    udist = pdist.Uniform(0, 1)
+    
+    progress = cprogress(N)
+    samples = []
+    for step in range(N):
+        with Cond(fcondition) as cstorage:
+            Cond(fcondition)(model).get_trace(**model_kwargs)
+        if cstorage.trace.nodes['cond']['value']:
+            score = observe(cstorage.trace)
+            if score >= threshold + udist.log_prob(udist.sample()):
+                samples.append(cstorage.trace.copy())
+        progress.succ(step)
+    progress.print_end()
+    return(samples)
+
+
+def observe(trace):
+    score = 0
+    for var in trace.nodes:
+        if "fn" in trace.nodes[var]:
+            val = trace.nodes[var]['value']
+            fn = trace.nodes[var]['fn']
+            score += fn.log_prob(val)
+    return(score)
 
 
 def make_dataFrame(samples, cprogress=ProgressCmd):
@@ -211,6 +259,10 @@ def test_rejection_sampler2(model=model3, model_kwargs={},
     samples = rejection_sampling(model, model_kwargs, fcondition, N)
 
     print("len(samples): ", len(samples))
+    plot_results1(samples)
+
+
+def plot_results1(samples):
     fsample, rsamples = samples[0], samples[1:]
 
     # init:
@@ -224,13 +276,23 @@ def test_rejection_sampler2(model=model3, model_kwargs={},
         print(var)
         
         plt.hist(_vars[var], 30,  # density=True,
-                 stacked=True
-                 # , rwidth=0.1, label=label
-             )
+                 stacked=True)  # , rwidth=0.1, label=label
+        
         plt.show()
         
 
+def test_rejection_sampler3(model=model4, condition=m4_fcond0,
+                            N=3, threshold=0):
+    samples = rejection_sampling1(model, {}, condition,
+                                  N=N, threshold=threshold)
+    print(len(samples))
+    plot_results1(samples)
+
+
 if __name__ == "__main__":
+
+    test_rejection_sampler3(N=30000, threshold=0.4)
+
     # test_rejection_sampler2(model=model3, fcondition=m3_fcond0, N=1700)
     # 1698/1700 ~ 0.9988
     # accurate: 0.9980537912897127
@@ -249,5 +311,5 @@ if __name__ == "__main__":
     '''
 
     # test_rejection_sampler1(model=model2, fcondition=m2_fcond, N=700)
-    test_rejection_sampler1(model=model1, fcondition=m1_fcond, N=700)
+    # test_rejection_sampler1(model=model1, fcondition=m1_fcond, N=700)
     # test_m1_1()

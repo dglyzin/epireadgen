@@ -2,6 +2,19 @@ import sympy as sm
 import numpy as np
 import scipy.integrate as integrate
 
+'''
+
+norm = lambda var, mu, sigm: 1/(sm.sqrt(2*sm.pi)*sigm)*sm.exp(-1/2*((var-mu)/sigm)**2)
+
+# FOR p(x|y) = p(y|x)p(x)/p(y) for p is all Normal:
+\mu_{x|y} = (\sigma_{x}^2 * y + \sigma_{y}^2 * \mu_{x})/(\sigma_{x}^2+\sigma_{y}^2)
+\sigma_{x|y} = \sigma_{x}^2 + \sigma_{y}^2
+f = lambda x: norm(x, 0.2/(1+0.1**2), 0.1/(sm.sqrt(1+0.1**2)))
+x = np.linspace(-3, 3, 1000)
+y = np.array([f(xx) for xx in x])
+plt.plot(x, y)
+# END FOR
+'''
 
 def P_xz(xs, zs, sigm_x=0.1, sigm_y=0.1, mu_z=0.0, sigm_z=0.1):
 
