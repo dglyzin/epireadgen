@@ -1,3 +1,5 @@
+import numpy as np
+
 import sim1 as sm1
 import lsim1 as lsm1
 from copy import deepcopy
@@ -64,11 +66,7 @@ def backward(transition, emission, obs, bprev=None):
 
     orest, olast = obs[:-1], obs[-1]
     
-    print(
-        sum([emission({"et": olast, "xt": xt}).to_numpy()
-             * transition({"xt": xt}).to_numpy() * b_t[i]
-             for i, xt in enumerate(transition.get_var_values("xt"))]))
-    
+    # here result will be a vector, dependence of xt1 (p(*|x_{t-1})):
     b_t1 = sum([emission({"et": olast, "xt": xt}).to_numpy()
                 * transition({"xt": xt}).to_numpy() * b_t[i]
                 for i, xt in enumerate(transition.get_var_values("xt"))])
@@ -105,34 +103,147 @@ def test_forward(obs=[1, 1]):
     print(f)
 
 
-def test_backward(obs=[1, 1]):
+def test_backward(obs=[1, 1], dbg_show_model=True):
     pt0 = sm1.CondProb("xt", parents=[], support=[[0, 1]])
     pt0.set({}, [0.5, 0.5])
-    print("pt0:")
-    print(pt0)
 
+    if dbg_show_model:
+        print("pt0:")
+        print(pt0)
+
+    # here xft1 means x_{t-1}:
     transition = sm1.CondProb("xt", parents=["xt1"],
                               support=[[0, 1], [0, 1]])
     transition.set({"xt1": 1}, [0.3, 0.7])
     transition.set({"xt1": 0}, [0.7, 0.3])
-    print("transition:")
-    print(transition)
+    if dbg_show_model:
+        print("transition:")
+        print(transition)
     
     emission = sm1.CondProb("et", parents=["xt"],
                             support=[[0, 1], [0, 1]])
     emission.set({"xt": 1}, [0.1, 0.9])
     emission.set({"xt": 0}, [0.8, 0.2])
-    print("emission:")
-    print(emission)
+    if dbg_show_model:
+        print("emission:")
+        print(emission)
     
     bt = backward(transition, emission, obs, None)
     print("bt(obs(k>t)=%s|xt):" % str(obs))
-    print(bt)
+    print(bt.df.to_numpy().T[0])
+    
+    # check:
+    fb = lambda tr, em, bs: sum([em[i]*tr[i]*bs[i] for i, _ in enumerate(tr)])
+    b = [1, 1]
+    for o in obs:
+        b = fb(np.array([[0.8, 0.1], [0.2, 0.9]])[o],
+               np.array([[0.7, 0.3], [0.3, 0.7]]), b)
+    print("b accurate:")
+    print(b)
+    assert (bt.df.to_numpy().T[0] == b).all()
+    
+
+def test_rejection_sampler(var_to_extract="xt2", obs=[1, 1], N=3, factor=1):
+    '''
+    var_to_extract="xt2" for forward (p(xt2|et1, et2)
+    var_to_extract="xt0" for backward (p(xt0| et1, et2)
+    in order to convert p(xt0|e1, e2) to p(e1, e2| xt0) we need a
+    factor p(xt0) = <0.5, 0.5>
+    '''
+    pt0 = sm1.CondProb("xt0", parents=[], support=[[0, 1]])
+    pt0.set({}, [0.5, 0.5])
+    print("pt0:")
+    print(pt0)
+
+    nodes = [pt0]
+    cond = []
+    for io, o in enumerate(obs):
+        transition = sm1.CondProb("xt"+str(io+1), parents=["xt"+str(io)],
+                                  support=[[0, 1], [0, 1]])
+        transition.set({"xt"+str(io): 1}, [0.3, 0.7])
+        transition.set({"xt"+str(io): 0}, [0.7, 0.3])
+        # print("transition:")
+        # print(transition)
+        nodes.append(transition)
+    
+        emission = sm1.CondProb("et"+str(io+1), parents=["xt"+str(io+1)],
+                                support=[[0, 1], [0, 1]])
+        emission.set({"xt"+str(io+1): 1}, [0.1, 0.9])
+        emission.set({"xt"+str(io+1): 0}, [0.8, 0.2])
+        # print("emission:")
+        # print(emission)
+        nodes.append(emission)
+
+        # here `[0]` means CondProb node value itself
+        # (its parent will have index [1])
+        # (result of sampling will be table value like (0, 1))
+        cond.append("$et"+str(io+1)+"[0]"+"=="+str(o))
+    cond = " and ".join(cond)
+    print("cond: ", cond)
+    
+    # print("nodes[-1].sample():")
+    # print(nodes[-1].sample())
+
+    net = sm1.BayesNet(nodes)
+    
+    print("net.sorted_vars:")
+    print(net.sorted_vars)
+
+    # print("net.prior_sample:")
+    # print(net.prior_sample())
+    
+    res0 = []
+    res1 = []
+
+    gindexes = []
+    steps = int(N/100)
+    for step in range(steps):
+        print("step %d from %d" % (step, steps))
+
+        # forward:
+        # var_to_extract = 'xt2' 
+        
+        # backward:
+        var_to_extract = 'xt0'
+        
+        samples, indexes, labels = sm1.rejection_sampling(net, 100,
+                                                          cond=cond)
+        print("len(samples): ", len(samples[var_to_extract]))
+        # print("indexes:")
+        # print(indexes)
+    
+        gindexes.extend(indexes[var_to_extract])
+        xt2 = np.array(gindexes)
+        # print(xt2)
+        n = len(xt2)
+        print("n: ", n)
+        if n > 0:
+            print("f2=p(x2|e2, e1)([0, 1]):")
+            xto = np.array([len(xt2[xt2 == 0])/n,
+                            len(xt2[xt2 == 1])/n]) * factor
+            
+            print(xto)
+            res0.append(xto[0])
+            res1.append(xto[1])
+
+    import matplotlib.pyplot as plt
+    plt.plot(res0)
+    plt.plot(res1)
+    plt.show()
 
 
 if __name__ == "__main__":
     
-    test_backward(obs=[1])
+    # accurate: 0.297229 0.702771
+    # 0.2973738900434536 0.7026261099565464
+    test_rejection_sampler(var_to_extract="xt0", factor=0.5, obs=[0, 1], N=27000)
+
+    # accurate: [0.18181818, 0.81818182]
+    # 0.1148881239242685 0.8851118760757315
+    # test_rejection_sampler(obs=[1, 1], N=27000)
+    
+    # test_backward(obs=[1], dbg_show_model=True)
+    # test_backward(obs=[1, 1], dbg_show_model=False)
     # test_forward(obs=[1, 1])
     # test_forward(obs=[0, 1])
     # test_forward(obs=[0, 0, 1])

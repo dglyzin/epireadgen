@@ -64,7 +64,7 @@ class BayesNet():
     def prior_sample(self, gevents=None):
         '''
         gevents like "a==0 and b>=0" supported only if there is 
-        no more then one contunues dist
+        no more then one continues dist
         otherwise {"a":0, b:[1, 2, 3]} must be used
         '''
         
@@ -80,6 +80,7 @@ class BayesNet():
             # dnode.set_params(samples)
 
             # samples will be from previous setps:
+            # (params, not parents!)
             dnode_pnames = dnode.reset_params(samples)
             # print("dnode_pnames:")
             # print(dnode_pnames)
@@ -209,7 +210,7 @@ class Probability():
     def set(self, events, ps):
         values = self.get_values(events)
         # print(values)
-        self.df.loc[values, :] = ps
+        self.df.loc[values, :] = np.array(ps)
 
     def reset_params(self, samples):
         dnode = self
@@ -283,6 +284,8 @@ class Probability():
         print(val.flatten())
         '''
         edist = sim2.Empirical(idx.to_numpy(), val.flatten())
+        # print("edist.sample():")
+        # print(edist.sample())
         return(edist.sample())
 
     def log_prob(self, events):
@@ -589,12 +592,15 @@ def rejection_sampling(net, N, cond, cprogress=ProgressCmd):
     return(samples, indexes, labels)
 
 
-def check_cond(samples, cond):
+def check_cond(samples, cond, dbg=None):
     cond = Template(cond)
-    # print("samples:")
-    # print(samples)
-    # print("cond:")
-    # print(cond.substitute(samples))
+    if dbg is not None:
+        if "check_cond" in dbg:
+            if dbg[check_cond]:
+                print("samples:")
+                print(samples)
+                print("cond:")
+                print(cond.substitute(samples))
     return(eval(cond.substitute(samples)))
 
 
@@ -1175,8 +1181,8 @@ if __name__ == "__main__":
      ->{y| Normal(z, 1.0)}
       ->{x| Normal(y, 0.1)}
     '''
-    test_rejection_sampler2(N=1700, cond="$x<0.5 and $z<0.5",
-                            sigm_x=0.1, sigm_y=1.0, mu_z=0.5, sigm_z=1.0)
+    # test_rejection_sampler2(N=1700, cond="$x<0.5 and $z<0.5",
+    #                         sigm_x=0.1, sigm_y=1.0, mu_z=0.5, sigm_z=1.0)
     # count of succ will be ~ 607
     # => P(x>=0.5) ~ 607/1700 ~ 0.3571
     # accurate: 0.3746040905409271
@@ -1196,6 +1202,7 @@ if __name__ == "__main__":
        ->{Color| [p(Color|"Bag": 0)=[0.1, 0.9],
                   p(Color|"Bag": 1) = [0.5, 0.5]]}
     '''
+    test_rejection_sampler(N=3, cond="$a>=0.7")
     # test_rejection_sampler(N=700, cond="$a>=0.7")
     # test_prior()
     # test_discrete_simple(events=None)
