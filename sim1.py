@@ -271,10 +271,10 @@ class Probability():
     def sample(self, events=None):
         val = self(events).to_numpy()
         idx = self.get_values(events, use_index=True)
+        # print(self)
+        # print("events:")
+        # print(events)
         '''
-        print(self)
-        print("events:")
-        print(events)
         print("idx:")
         print(idx)
         print("")
@@ -284,9 +284,11 @@ class Probability():
         print(val.flatten())
         '''
         edist = sim2.Empirical(idx.to_numpy(), val.flatten())
+        r = edist.sample()
         # print("edist.sample():")
+        # print(r)
         # print(edist.sample())
-        return(edist.sample())
+        return(r)
 
     def log_prob(self, events):
 
@@ -439,6 +441,14 @@ def update(d1, d2):
         return(d1 + reduce(
             lambda acc, x: " and " + x[0] + "==" + str(x[1]) + acc,
             d2.items(), ""))
+    elif d1 is None and d2 is None:
+        return(None)
+    elif d1 is None:
+        return(d2)
+    elif d2 is None:
+        return(d1)
+    else:
+        raise(Exception("update(d1, d2): types not supported"))
 
 
 def enumeration_join(p, var, events={}):
@@ -1065,7 +1075,7 @@ def test_rejection_sampler(N=3, cond="$a>=0.7"):
     # print(indexes)
     # print(labels)
 
-    plot_results1(net.sorted_vars, indexes)
+    # plot_results1(net.sorted_vars, indexes)
 
 
 def test_rejection_sampler1(N=3, cond="$a>=0.7"):
@@ -1201,9 +1211,10 @@ if __name__ == "__main__":
       ->{Bag| [p(Bug=0)=1-a, p(Bug=1)=a]}
        ->{Color| [p(Color|"Bag": 0)=[0.1, 0.9],
                   p(Color|"Bag": 1) = [0.5, 0.5]]}
+    # accurate P(B|a>=0.7) =P(B, a>=0.7)/p(a>=0.7) =  <0.15, 0.85>
     '''
     test_rejection_sampler(N=3, cond="$a>=0.7")
-    # test_rejection_sampler(N=700, cond="$a>=0.7")
+    # test_rejection_sampler(N=3700, cond="$a>=0.7")
     # test_prior()
     # test_discrete_simple(events=None)
     # test_discrete_simple(events="Z1+Z2==1")

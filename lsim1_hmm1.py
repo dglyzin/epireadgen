@@ -4,6 +4,13 @@ import sim1 as sm1
 import lsim1 as lsm1
 from copy import deepcopy
 
+try:
+    import pyro
+    import pyro.distributions as pdist
+    import torch
+except ModuleNotFoundError:
+    print("pyro or torch not installed!")
+
 
 def forward(pt0, transition, emission, obs, fprev=None):
 
@@ -77,28 +84,67 @@ def backward(transition, emission, obs, bprev=None):
                     bprev=b_t1))
     
 
-def test_forward(obs=[1, 1]):
-    pt0 = sm1.CondProb("xt", parents=[], support=[[0, 1]])
+def create_model(obs):
+    pt0 = sm1.CondProb("xt0", parents=[], support=[[0, 1]])
     pt0.set({}, [0.5, 0.5])
     print("pt0:")
     print(pt0)
+
+    nodes = [pt0]
+    cond = []
+    for io, o in enumerate(obs):
+        transition = sm1.CondProb("xt"+str(io+1), parents=["xt"+str(io)],
+                                  support=[[0, 1], [0, 1]])
+        transition.set({"xt"+str(io): 1}, [0.3, 0.7])
+        transition.set({"xt"+str(io): 0}, [0.7, 0.3])
+        # print("transition:")
+        # print(transition)
+        nodes.append(transition)
+    
+        emission = sm1.CondProb("et"+str(io+1), parents=["xt"+str(io+1)],
+                                support=[[0, 1], [0, 1]])
+        emission.set({"xt"+str(io+1): 1}, [0.1, 0.9])
+        emission.set({"xt"+str(io+1): 0}, [0.8, 0.2])
+        # print("emission:")
+        # print(emission)
+        nodes.append(emission)
+
+        # here `[0]` means CondProb node value itself
+        # (its parent will have index [1])
+        # (result of sampling will be table value like (0, 1))
+        cond.append("$et"+str(io+1)+"[0]"+"=="+str(o))
+    cond = " and ".join(cond)
+    print("cond: ", cond)
+    
+    # print("nodes[-1].sample():")
+    # print(nodes[-1].sample())
+
+    net = sm1.BayesNet(nodes)
+    return(net, cond)
+
+
+def test_forward(obs=[1, 1]):
+    pt0 = sm1.CondProb("xt", parents=[], support=[[0, 1]])
+    pt0.set({}, [0.5, 0.5])
+    # print("pt0:")
+    # print(pt0)
 
     transition = sm1.CondProb("xt", parents=["xt1"],
                               support=[[0, 1], [0, 1]])
     transition.set({"xt1": 1}, [0.3, 0.7])
     transition.set({"xt1": 0}, [0.7, 0.3])
-    print("transition:")
-    print(transition)
+    # print("transition:")
+    # print(transition)
     
     emission = sm1.CondProb("et", parents=["xt"],
                             support=[[0, 1], [0, 1]])
     emission.set({"xt": 1}, [0.1, 0.9])
     emission.set({"xt": 0}, [0.8, 0.2])
-    print("emission:")
-    print(emission)
+    # print("emission:")
+    # print(emission)
     
     f = forward(pt0, transition, emission, obs, None)
-    print("obs = umbrella")
+    # print("obs = umbrella")
     print("ft(xt|obs(k<=t)=%s):" % str(obs))
     print(f)
 
@@ -143,59 +189,77 @@ def test_backward(obs=[1, 1], dbg_show_model=True):
     assert (bt.df.to_numpy().T[0] == b).all()
     
 
-def test_rejection_sampler(var_to_extract="xt2", obs=[1, 1], N=3, factor=1):
-    '''
-    var_to_extract="xt2" for forward (p(xt2|et1, et2)
-    var_to_extract="xt0" for backward (p(xt0| et1, et2)
-    in order to convert p(xt0|e1, e2) to p(e1, e2| xt0) we need a
-    factor p(xt0) = <0.5, 0.5>
-    '''
-    pt0 = sm1.CondProb("xt0", parents=[], support=[[0, 1]])
-    pt0.set({}, [0.5, 0.5])
-    print("pt0:")
-    print(pt0)
+def test_fb0():
+    '''general hmm'''
 
-    nodes = [pt0]
-    cond = []
-    for io, o in enumerate(obs):
-        transition = sm1.CondProb("xt"+str(io+1), parents=["xt"+str(io)],
-                                  support=[[0, 1], [0, 1]])
-        transition.set({"xt"+str(io): 1}, [0.3, 0.7])
-        transition.set({"xt"+str(io): 0}, [0.7, 0.3])
-        # print("transition:")
-        # print(transition)
-        nodes.append(transition)
-    
-        emission = sm1.CondProb("et"+str(io+1), parents=["xt"+str(io+1)],
-                                support=[[0, 1], [0, 1]])
-        emission.set({"xt"+str(io+1): 1}, [0.1, 0.9])
-        emission.set({"xt"+str(io+1): 0}, [0.8, 0.2])
-        # print("emission:")
-        # print(emission)
-        nodes.append(emission)
+    pt0 = sm1.CondProb("xt", parents=[], support=[[0, 1, 2, 3]])
+    pt0.set({}, [0.5, 0.5, 0.5, 0.5])
 
-        # here `[0]` means CondProb node value itself
-        # (its parent will have index [1])
-        # (result of sampling will be table value like (0, 1))
-        cond.append("$et"+str(io+1)+"[0]"+"=="+str(o))
-    cond = " and ".join(cond)
-    print("cond: ", cond)
-    
-    # print("nodes[-1].sample():")
-    # print(nodes[-1].sample())
+    transition = sm1.CondProb("xt", parents=["xt1"],
+                              support=[[0, 1, 2, 3], [0, 1, 2, 3]])
+    transition.set({"xt1": 0}, [0.4, 0.3, 0.2, 0.1])
+    transition.set({"xt1": 1}, [0.3, 0.4, 0.2, 0.1])
+    transition.set({"xt1": 2}, [0.2, 0.3, 0.4, 0.1])
+    transition.set({"xt1": 3}, [0.1, 0.2, 0.3, 0.4])
 
-    net = sm1.BayesNet(nodes)
-    
+    emission = sm1.CondProb("et", parents=["xt"],
+                            support=[[0, 1], [0, 1, 2, 3]])
+    emission.set({"xt": 0}, [0.1, 0.9])
+    emission.set({"xt": 2}, [0.1, 0.9])
+    emission.set({"xt": 1}, [0.8, 0.2])
+    emission.set({"xt": 3}, [0.8, 0.2])
+
+    obs = [1, 1]
+    f = lsm1.forward(pt0, transition, emission, obs, None)
+    print("f:")
+    print(f)
+    print("bt:")
+    bt = lsm1.backward(transition, emission, obs, None)
+    print(bt)
+
+
+def test_rejection_sampler_work():
+    net, cond = create_model([])
     print("net.sorted_vars:")
     print(net.sorted_vars)
 
+
+def test_rejection_sampler(mode="forward", obs=[1, 1], N=3):
+    '''
+    TODO: continues, pyro
+ 
+    var_to_extract="xt2" for forward (p(xt2|et1, et2)
+    var_to_extract="xt0" for backward (p(xt0| et1, et2)
+    in order to convert p(xt0|e1, e2) to p(e1, e2| xt0) we need a
+    factor 1/p(xt0) = 1/<0.5, 0.5> i.e.:
+    p(e2, e1|xt0) = p(xt0|e1, e2)*p(e1, e2)/p(xt0)
+
+    transition constant [[0.7, 0.3], [0.3, 0.7]]
+    emission constant [[0.8, 0.2], [0.1, 0.9]]
+    '''
+    net, cond = create_model(obs)
+    print("net.sorted_vars:")
+    print(net.sorted_vars)
+    cond = "True" if cond == "" else cond
+    print("cond:")
+    print(cond)
+
     # print("net.prior_sample:")
     # print(net.prior_sample())
-    
+    if mode == "forward":
+        var_to_extract = "xt2"
+        factor = 1
+    elif mode == "backward":
+        var_to_extract = "xt0"
+        # factor = 1/0.5
+        factor = 1/2.
+    else:
+        raise(Exception("mode forward or backward"))
     res0 = []
     res1 = []
 
     gindexes = []
+    allindexes = {}
     steps = int(N/100)
     for step in range(steps):
         print("step %d from %d" % (step, steps))
@@ -204,25 +268,42 @@ def test_rejection_sampler(var_to_extract="xt2", obs=[1, 1], N=3, factor=1):
         # var_to_extract = 'xt2' 
         
         # backward:
-        var_to_extract = 'xt0'
+        # var_to_extract = 'xt0'
         
         samples, indexes, labels = sm1.rejection_sampling(net, 100,
                                                           cond=cond)
         print("len(samples): ", len(samples[var_to_extract]))
         # print("indexes:")
         # print(indexes)
-    
         gindexes.extend(indexes[var_to_extract])
         xt2 = np.array(gindexes)
         # print(xt2)
         n = len(xt2)
         print("n: ", n)
         if n > 0:
-            print("f2=p(x2|e2, e1)([0, 1]):")
+            for var in indexes:
+                if var not in allindexes:
+                    allindexes[var] = []
+                allindexes[var].extend(indexes[var])
+                xs = np.array(allindexes[var])
+                print(var)
+                print(np.array([len(xs[xs == 0]), len(xs[xs == 1])])/n)
+        
+            # print("f2=p(x2|e2, e1)(%s):" % str(obs))
+
             xto = np.array([len(xt2[xt2 == 0])/n,
-                            len(xt2[xt2 == 1])/n]) * factor
+                            len(xt2[xt2 == 1])/n])
             
-            print(xto)
+            # print(xto)
+            xtoo = np.array([len(xt2[xt2 == 0])/n,
+                             len(xt2[xt2 == 1])/n]) * factor
+            # print(xtoo)
+            
+            # print("xto/2.:")
+            # print(xto/2.)
+            # print("xto/0.5:")
+            # print(xto/0.5)
+            
             res0.append(xto[0])
             res1.append(xto[1])
 
@@ -232,18 +313,58 @@ def test_rejection_sampler(var_to_extract="xt2", obs=[1, 1], N=3, factor=1):
     plt.show()
 
 
-if __name__ == "__main__":
+def test_gen():
+    # obs is not important here, as well as cond:
+    net, cond = create_model([1, 2])
+
+    print("net.prior_sample():")
+    print(net.prior_sample())
     
-    # accurate: 0.297229 0.702771
-    # 0.2973738900434536 0.7026261099565464
-    test_rejection_sampler(var_to_extract="xt0", factor=0.5, obs=[0, 1], N=27000)
+
+def test_enumeration_backward(obs=[1]):
+    eobs = dict(("et%d" % (t+1), o) for t, o in enumerate(obs))
+    print("eobs:")
+    print(eobs)
+    net, cond = create_model(obs)
+    print("net.sorted_vars:")
+    print(net.sorted_vars)
+    print("backward:")
+    result = sm1.enumeration_ask(net, "xt0", eobs)
+    # result = sm1.enumeration_ask(net, "xt0", {"et1": 1})
+    print("p(xt0|et1==%s):" % str(obs))
+    print(result)
+
+
+if __name__ == "__main__":
+
+    # test_enumeration_backward(obs=[1, 0])
+    # accurate p(x0|e1=1, e2=0): 0.418892  0.581108
+    # test_enumeration_backward(obs=[1])
+    test_rejection_sampler(mode="backward", obs=[1, 0], N=3000)
+    #  result: 0.37878788 0.62121212
+
+    # test_gen()
+    # test_rejection_sampler_work()
+    
+    # accurate p(x0|e1=1): 0.372 0.627
+    # result p(x0|e1=1): 0.35366605 0.64633395
+    # accurate p(x1|e1=1) = forward(1): 0.181818 0.818182
+    # result p(x1|e1=1): 0.18237831 0.81762169
+    # test_rejection_sampler(mode="backward", obs=[1], N=3000)
+
+    # test_rejection_sampler(var_to_extract="xt0", factor=0.5, obs=[0, 1], N=27000)
 
     # accurate: [0.18181818, 0.81818182]
     # 0.1148881239242685 0.8851118760757315
     # test_rejection_sampler(obs=[1, 1], N=27000)
     
     # test_backward(obs=[1], dbg_show_model=True)
-    # test_backward(obs=[1, 1], dbg_show_model=False)
+    # print("\nbackward:")
+    # test_backward(obs=[1], dbg_show_model=False)
+    
+    # print("\nforward:")
+    # test_forward(obs=[1])
+    
     # test_forward(obs=[1, 1])
     # test_forward(obs=[0, 1])
     # test_forward(obs=[0, 0, 1])

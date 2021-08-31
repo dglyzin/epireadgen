@@ -34,6 +34,8 @@ def model1():
        ->{Color| [p(Color|"Bag": 0)=[0.1, 0.9],
                   p(Color|"Bag": 1) = [0.5, 0.5]]}
     Ask what p(X|cond) will be for X is some of [a, Bag, Color]
+    
+    # accurate P(B|a>=0.7) =P(B, a>=0.7)/p(a>=0.7) =  <0.15, 0.85>
     '''
     p = pyro.sample("p", pdist.Uniform(0, 1))
     # p(Bag|p) (note probability reverse in Categorical!):
@@ -44,6 +46,31 @@ def model1():
 
 
 def m1_fcond(trace):
+    return(trace.nodes['p']['value'] >= 0.7)
+
+
+def model1v1(N=10):
+    '''
+    Model:
+    {a| a=Uniform(0, 1)}
+      ->{Bag| [p(Bug=0)=1-a, p(Bug=1)=a]}
+       ->{Color| [p(Color|"Bag": 0)=[0.1, 0.9],
+                  p(Color|"Bag": 1) = [0.5, 0.5]]}
+    Ask what p(X|cond) will be for X is some of [a, Bag, Color]
+    # used array for cond
+
+    # accurate P(B|a>=0.7) =P(B, a>=0.7)/p(a>=0.7) =  <0.15, 0.85>
+    '''
+    with pyro.plate("pl", N):
+        p = pyro.sample("p", pdist.Uniform(0, 1))
+        # p(Bag|p) (note probability reverse in Categorical!):
+        bag = pyro.sample("Bag", pdist.Categorical(torch.tensor([1-p, p])))
+        pColor = torch.tensor([[0.1, 0.9], [0.5, 0.5]])
+        color = pyro.sample("Color", pdist.Categorical(pColor[bag.type(torch.long)]))
+    return(color)
+
+
+def m1v1_fcond(trace):
     return(trace.nodes['p']['value'] >= 0.7)
 # END FOR
 
@@ -136,6 +163,7 @@ class Cond(pyro.poutine.trace_messenger.TraceMessenger):
         return pyro.poutine.trace_messenger.TraceMessenger.__exit__(self, *args, **kwargs)
 
 
+'''
 def rejection_sampling(model, model_kwargs, fcondition,
                        N=3, cprogress=ProgressCmd):
     progress = cprogress(N)
@@ -148,10 +176,12 @@ def rejection_sampling(model, model_kwargs, fcondition,
         progress.succ(step)
     progress.print_end()
     return(samples)
+'''
 
 
 def rejection_sampling1(model, model_kwargs, fcondition,
-                        N=3, cprogress=ProgressCmd, threshold=0):
+                        N=3, cprogress=ProgressCmd, threshold=0,
+                        use_score=False):
     '''rejection_sampling with use of score
     for observing continues (like Normal == 0.1 or Uniform == 0.1)
     
@@ -167,8 +197,11 @@ def rejection_sampling1(model, model_kwargs, fcondition,
         with Cond(fcondition) as cstorage:
             Cond(fcondition)(model).get_trace(**model_kwargs)
         if cstorage.trace.nodes['cond']['value']:
-            score = observe(cstorage.trace)
-            if score >= threshold + udist.log_prob(udist.sample()):
+            if use_score:
+                score = observe(cstorage.trace)
+                if score >= threshold + udist.log_prob(udist.sample()):
+                    samples.append(cstorage.trace.copy())
+            else:
                 samples.append(cstorage.trace.copy())
         progress.succ(step)
     progress.print_end()
@@ -183,6 +216,7 @@ def observe(trace):
             fn = trace.nodes[var]['fn']
             score += fn.log_prob(val)
     return(score)
+
 
 
 def make_dataFrame(samples, cprogress=ProgressCmd):
@@ -206,9 +240,16 @@ def plot_results(df):
     for var in df.columns:
         print("\nvar: ", var)
         var_data = df[var].to_numpy().astype(np.float)
-        print("probs of var (bin=2):")
-        var_data = torch.histc(torch.tensor(var_data), 2) 
-        print(var_data/var_data.sum())
+
+        x = var_data
+        # xvals = np.array(list(set(x)))
+        xcounts = np.array([len(x[x == i]) for i in set(x)])
+        print("probabilties:")
+        print(xcounts/xcounts.sum())
+
+        # print("probs of var (bin=2):")
+        # var_data = torch.histc(torch.tensor(var_data), 2) 
+        # print(var_data/var_data.sum())
 
         plt.hist(df[var].to_numpy(), 30,  # density=True,
                  stacked=True
@@ -236,73 +277,90 @@ def test_m1_1(N=3):
 
 
 def test_rejection_sampler(N=3):
-    samples = rejection_sampling(model1, {}, m1_fcond, N)
+    samples = rejection_sampling1(model1, {}, m1_fcond, N)
     print([sample.nodes['cond']['value'] for sample in samples])
     print([sample.nodes['Color']['value'] for sample in samples])
 
 
-def test_rejection_sampler1(model=model1, fcondition=m1_fcond, N=3):
+def test_rejection_sampler_m1(model=model1, fcondition=m1_fcond, N=3):
 
     '''with plot and DataFrame'''
 
-    samples = rejection_sampling(model, {}, fcondition, N)
+    samples = rejection_sampling1(model, {}, fcondition, N)
     df = make_dataFrame(samples)
     plot_results(df)
     return(df)
 
 
-def test_rejection_sampler2(model=model3, model_kwargs={},
-                            fcondition=m3_fcond0, N=3):
+def test_rejection_sampler_m3(model=model3, model_kwargs={},
+                              fcondition=m3_fcond0, N=3):
 
     '''with plot and DataFrame'''
 
-    samples = rejection_sampling(model, model_kwargs, fcondition, N)
+    samples = rejection_sampling1(model, model_kwargs, fcondition, N)
 
     print("len(samples): ", len(samples))
     plot_results1(samples)
 
 
-def plot_results1(samples):
+def plot_results1(samples, var_name=None, cprogress=ProgressCmd):
     fsample, rsamples = samples[0], samples[1:]
 
     # init:
     _vars = dict([(var, []) for var in fsample.nodes])
 
-    for sample in rsamples:
+    progress = cprogress(len(rsamples), prefix="making arrays for plot:")
+    for step, sample in enumerate(rsamples):
         for var in fsample.nodes:
-            _vars[var].append(sample.nodes[var]["value"])
+            _vars[var].append(float(sample.nodes[var]["value"]))
+        progress.succ(step)
+    progress.print_end()
 
-    for var in _vars:
-        print(var)
-        
-        plt.hist(_vars[var], 30,  # density=True,
-                 stacked=True)  # , rwidth=0.1, label=label
-        
-        plt.show()
+    if var_name is not None:
+        plot_hist(var_name, _vars)
+    else:
+        for var in _vars:
+            print(var)
+            plot_hist(var, _vars)
         
 
-def test_rejection_sampler3(model=model4, condition=m4_fcond0,
-                            N=3, threshold=0):
+def plot_hist(var, vars):
+    print("var: ", var)
+    # print("vars[var]")
+    # print(vars[var])
+    x = np.array(vars[var])
+    xvals = np.array(list(set(x)))
+    xcounts = np.array([len(x[x == i]) for i in set(x)])
+    print("probabilties:")
+    print(xcounts/xcounts.sum())
+    plt.hist(vars[var], 30,  # density=True,
+             stacked=True, color='g')  # , rwidth=0.1, label=label
+    
+    plt.show()
+    
+
+def test_rejection_sampler1_m4(model=model4, condition=m4_fcond0,
+                               N=3, threshold=0):
     samples = rejection_sampling1(model, {}, condition,
-                                  N=N, threshold=threshold)
+                                  N=N, threshold=threshold, use_score=True)
     print(len(samples))
     plot_results1(samples)
 
 
 if __name__ == "__main__":
 
-    test_rejection_sampler3(N=30000, threshold=0.4)
+    # test_rejection_sampler1_m4(N=30000, threshold=0.4)
 
-    # test_rejection_sampler2(model=model3, fcondition=m3_fcond0, N=1700)
+    # test_rejection_sampler_m3(model=model3, fcondition=m3_fcond0, N=1700)
     # 1698/1700 ~ 0.9988
     # accurate: 0.9980537912897127
 
-    # test_rejection_sampler2(model=model3, fcondition=m3_fcond1, N=17000)
+    # test_rejection_sampler_m3(model=model3, fcondition=m3_fcond1, N=17000)
     # 36/17000 ~ 0.0020588
     # accurate: 0.0019462084167189077
 
     '''
-    test_rejection_sampler2(
+    test_rejection_sampler_m3(
         model=model3,
         model_kwargs={"sigm_x": 0.1, "sigm_y": 0.1, "mu_z": 0.5},
         fcondition=m3_fcond2, N=1700)
@@ -310,6 +368,9 @@ if __name__ == "__main__":
     # accurate: 0.3746040905409271
     '''
 
-    # test_rejection_sampler1(model=model2, fcondition=m2_fcond, N=700)
-    # test_rejection_sampler1(model=model1, fcondition=m1_fcond, N=700)
+    # test_rejection_sampler_m1(model=model2, fcondition=m2_fcond, N=700)
+    test_rejection_sampler_m1(model=model1, fcondition=m1_fcond, N=7000)
+    # result: [0.14980545 0.85019455]
+    # accurate P(B|a>=0.7) =P(B, a>=0.7)/p(a>=0.7) =  <0.15, 0.85>
+    
     # test_m1_1()
