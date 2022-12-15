@@ -16,6 +16,8 @@ import os
 import progresses.progress_cmd as progress_cmd
 ProgressCmd = progress_cmd.ProgressCmd
 
+import characteristics as chars
+
 path_video = "results"
 
 
@@ -25,6 +27,12 @@ class ResultCollectorMessenger(
         '''
         - ``trace`` -- trace to take results from
         - ``step`` -- step throu which the results to be collected
+        - ``video`` -- if true images will be created during computations in
+        the `path_video` folder and no results will be stored in memory, so
+        plot results["z"][-1] will return only init data
+        if false then results will be collected in `self.results` and
+        `self.plot_state` and `self.plot_states` could return
+        the data from any recorded time step. 
         '''
         self.step = step
         self.results = {}
@@ -164,8 +172,8 @@ class ResultCollectorMessenger(
             l = np.sqrt(U**2+V**2)
             print("min l", l.max())
 
-            plt.plot(U, label="U()")
-            plt.plot(V, label="V")
+            plt.plot(U, label="U(x=%s, t)" % idx_x)
+            plt.plot(V, label="V(x=%s, t)" % idx_x)
             plt.plot(l, label="$U^{2}+V^{2}$")
         plt.legend(loc="upper left")
         plt.show()
@@ -693,6 +701,8 @@ def test_solver(t0, t1, dt, dd, ll, in_filename, out_filename,
 
     - ``ll`` -- tuple of space sizes
     like (10,) or (10, 10,), ...
+    - ``video`` -- setting to true will force `ResultCollectorMessenger`
+    do not collect result so `plot_state(t)` will not work for all t.
     '''
     
     if cuda:
@@ -726,16 +736,21 @@ def test_solver(t0, t1, dt, dd, ll, in_filename, out_filename,
             count_neg_t = model.count_neg_t+3
             # count_neg_t = 10
             # print("count_neg_t:", count_neg_t)
-            with StackCleanerMessenger(
-                    tr0.trace, count_neg_t, stack_size) as stack:
-                print("\nstack_size:")
-                print(stack.stack_size)
-                # print(model.tt)
-                model(tr0.trace)
-                # tr0.show_series()
-                tr0.show_series_size()
-                # stack.show_stack()
-                stack.show_stack_size()
+            with chars.Correlation(tr0.trace, 1) as corr:
+                with StackCleanerMessenger(
+                        tr0.trace, count_neg_t, stack_size) as stack:
+                    print("\nstack_size:")
+                    print(stack.stack_size)
+                    # print(model.tt)
+                    model(tr0.trace)
+                    # tr0.show_series()
+                    tr0.show_series_size()
+                    # stack.show_stack()
+                    stack.show_stack_size()
+    corr.plot(all=False)
+    # print("corr.result:")
+    # print(corr.results['C'])
+    print("corr.result.shape: ", corr.results['C'].shape)
     # print("\nlen _PYRO_PARAM_STORE._params.keys:")
     # print(len(_PYRO_PARAM_STORE._params.keys()))
     # print(_PYRO_PARAM_STORE._params.keys())
@@ -766,8 +781,8 @@ if __name__ == "__main__":
     else:
         print("solving main problem:")
         # test_solver(-1, 10, 0.01, (0.01, 0.01), (3, 3),
-        test_solver(-1, 0.03, 0.01, (0.01,), (100,),
+        test_solver(-1, 10, 0.01, (0.01,), (10,),
                     in_filename="N.tmp",
-                    out_filename="res.tmp")
+                    out_filename="res.tmp", video=False)
 
     
