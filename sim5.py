@@ -1,3 +1,8 @@
+# to find N (to create `N.tmp` file):
+# $ python3 -m sim5 -init
+# for a main:
+# $ python3 -m sim5
+
 import pyro
 import torch
 from torch.nn import Conv1d, Conv2d, Conv3d
@@ -104,6 +109,9 @@ class ResultCollectorMessenger(
     def show_results_size(self):
         print("\nlen results.keys:")
         print(len(self.results.keys()))
+        for key in self.results:
+            print("key size:")
+            print(self.results[key].shape)
         print("\nlen _param.keys:")
         print(len(self._params.keys()))
         
@@ -737,19 +745,27 @@ def test_solver(t0, t1, dt, dd, ll, in_filename, out_filename,
             # count_neg_t = 10
             # print("count_neg_t:", count_neg_t)
             with chars.Correlation(tr0.trace, 1) as corr:
-                with StackCleanerMessenger(
-                        tr0.trace, count_neg_t, stack_size) as stack:
-                    print("\nstack_size:")
-                    print(stack.stack_size)
-                    # print(model.tt)
-                    model(tr0.trace)
-                    # tr0.show_series()
-                    tr0.show_series_size()
-                    # stack.show_stack()
-                    stack.show_stack_size()
+                with chars.Lyapunov(dd[0], dd[0], tr0.trace, 1) as lpv:
+                    with StackCleanerMessenger(
+                            tr0.trace, count_neg_t, stack_size) as stack:
+                        print("\nstack_size:")
+                        print(stack.stack_size)
+                        # print(model.tt)
+                        model(tr0.trace)
+                        # tr0.show_series()
+                        tr0.show_series_size()
+                        # stack.show_stack()
+                        stack.show_stack_size()
+    print("lpv.results:")
+    print(lpv.results["Lambda"])
+    lpv.plot(all=True)
+    print("len(lpv.results)")
+    print(len(lpv.results["Lambda"]))
     corr.plot(all=False)
-    # print("corr.result:")
+    # print("len corr.result:")
     # print(corr.results['C'])
+    print("corr.init_count:")
+    print(corr.init_count)
     print("corr.result.shape: ", corr.results['C'].shape)
     # print("\nlen _PYRO_PARAM_STORE._params.keys:")
     # print(len(_PYRO_PARAM_STORE._params.keys()))
@@ -781,7 +797,7 @@ if __name__ == "__main__":
     else:
         print("solving main problem:")
         # test_solver(-1, 10, 0.01, (0.01, 0.01), (3, 3),
-        test_solver(-1, 10, 0.01, (0.01,), (10,),
+        test_solver(-1, 100, 0.01, (0.01,), (10,),
                     in_filename="N.tmp",
                     out_filename="res.tmp", video=False)
 

@@ -12,7 +12,8 @@ class Char(Messenger):
         self.step = step
 
         # dict with args for return:
-        self.results = {}
+        if not hasattr(self, "results"):
+            self.results = {}
 
         # set up init values
         if trace is not None:
@@ -30,9 +31,29 @@ class Char(Messenger):
         idx = int(idx)
         if idx % self.step == 0:
             self.update(name, idx, value)
+            self.update_msg(msg)
 
     def update(self, name, time, value):
+        '''for updating current characteristic at each call of pyro.param'''
         pass
+
+    def update_msg(self, msg):
+        '''for updating msg. to plot interactivly for example. '''
+        pass
+
+    def _plot(self, charname, all=False):
+        C = self.results[charname].detach().numpy()
+        # print("C.shape", C.shape)
+        if all:
+            plt.plot(C[:, 0, :])
+            plt.plot(C[:, 1, :])
+        else:
+            mid = C.shape[-1]//2
+            print(C[:, 0, mid])
+            plt.plot(C[:, 0, mid], label="U")
+            plt.plot(C[:, 1, mid], label="V")
+        plt.legend(loc="upper left")
+        plt.show()
 
 
 class Correlation(Char):
@@ -41,16 +62,7 @@ class Correlation(Char):
     connected with each other'''
 
     def plot(self, all=False):
-        C = self.results["C"].detach().numpy()
-        if all:
-            plt.plot(C[:, 0, :])
-            plt.plot(C[:, 1, :])
-        else:
-            mid = C.shape[-1]//2
-            plt.plot(C[:, 0, mid], label="U")
-            plt.plot(C[:, 1, mid], label="V")
-        plt.legend(loc="upper left")
-        plt.show()
+        self._plot("C", all=all)
 
     def __exit__(self, *args, **kwargs):
         uv = self.cat_results()
@@ -60,6 +72,8 @@ class Correlation(Char):
         N = uv.shape[0]
         C = torch.zeros((N//2,)+uv.shape[1:])
 
+        # in all slices below u and v; space dim - all will
+        # be preserved
         E = 1/N*(uv.sum(0))
         muv = uv - E
         C[0] = 1/N*(muv[:]*muv[:]).sum(0)
@@ -79,10 +93,46 @@ class Correlation(Char):
              for name in self.trace.nodes], 0)
         
 
-'''
 class Lyapunov(Char):
-    def __init__(*args, **kwargs):
+    def __init__(self, dx, dy, *args, **kwargs):
+
+        self.epsilon = min(dx, dy)
+        self.results = {}
+        self.results["Lambda"] = []
+        
         Char.__init__(self, *args, **kwargs)
 
-        self.
-'''
+    def __exit__(self, *args, **kwargs):
+        # convert list to torch:
+        self.results["Lambda"] = torch.cat(list(map(
+            lambda x: x.unsqueeze(0), self.results["Lambda"])))
+
+        Messenger.__exit__(self, *args, **kwargs)
+
+    def plot(self, all=False):
+        self._plot("Lambda", all=all)
+
+    def update(self, name, time, value):
+        uv = value
+        # print("uv.shape", uv.shape)
+        if len(uv[0].shape) == 1:
+            uv1, uv0 = uv[:, 1:], uv[:, :-1]
+        elif len(uv[0].shape) == 2:
+            uv1, uv0 = uv[:, 1:, 1:], uv[:, :-1, :-1]
+        elif len(uv[0].shape) == 3:
+            uv1, uv0 = uv[:, 1:, 1:, 1:], uv[:, :-1, :-1, :-1]
+        duv = uv1-uv0
+        # print("duv")
+        # print(duv)
+        # print("self.epsilon", self.epsilon)
+        # print("time:", time)
+        l = torch.log(torch.abs(duv)/self.epsilon)/time
+        # print("l", l)
+        self.results["Lambda"].append(l)
+    
+    def update_msg(self, msg):
+        if "chars" in msg:
+            msg["chars"]["Lambda"] = self.results["Lambda"][-1]
+        else:
+            msg["chars"] = {}
+            msg["chars"]["Lambda"] = self.results["Lambda"][-1]

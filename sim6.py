@@ -127,23 +127,28 @@ def model0(obs_flips, obs_coins, obs_boxes, obs_vagons,
     if dbg:
         print("FROM model0 =======")
     alpha_vagons, beta_vagons = params_vagons    
-    vagons_param = pyro.sample(
-        "param_vagons", pdist.Uniform(alpha_vagons, beta_vagons))
+    # this due to log_prob independence problem:
+    with pyro.plate("pvagons_plate", size=alpha_vagons.shape[0]):
+        vagons_param = pyro.sample(
+            "param_vagons", pdist.Uniform(alpha_vagons, beta_vagons))
     # vagons_param = transform_to(constraints.interval(0.01, 0.99))(vagons_param)
 
     alpha_boxes, beta_boxes = params_boxes
-    boxes_param = pyro.sample(
-        "param_boxes", pdist.Uniform(alpha_boxes, beta_boxes))
+    with pyro.plate("pboxes_plate0", size=alpha_boxes.shape[1]), pyro.plate("pboxes_plate1", size=alpha_boxes.shape[0]):
+        boxes_param = pyro.sample(
+            "param_boxes", pdist.Uniform(alpha_boxes, beta_boxes))
     # boxes_param = transform_to(constraints.interval(0.01, 0.99))(boxes_param)
 
     alpha_coins, beta_coins = params_coins    
-    coins_param = pyro.sample(
-        "param_coins", pdist.Uniform(alpha_coins, beta_coins))
+    with pyro.plate("pcoins_plate", size=alpha_coins.shape[0]):
+        coins_param = pyro.sample(
+            "param_coins", pdist.Uniform(alpha_coins, beta_coins))
     # coins_param = transform_to(constraints.interval(0.01, 0.99))(coins_param)
 
     alpha_flips, beta_flips = params_flips
-    flips_param = pyro.sample(
-        "param_flips", pdist.Uniform(alpha_flips, beta_flips))
+    with pyro.plate("pflips_plate", size=alpha_flips.shape[0]):
+        flips_param = pyro.sample(
+            "param_flips", pdist.Uniform(alpha_flips, beta_flips))
     # flips_param = transform_to(constraints.interval(0.01, 0.99))(flips_param)
 
     flips = []
@@ -239,8 +244,9 @@ def guide_model0(obs_flips, obs_coins, obs_boxes, obs_vagons, dbg=False):
             blow_bound*torch.ones(3), bhigh_bound*torch.ones(3)).sample(),
         constraint=constraints.interval(blow_bound, bhigh_bound))
     alpha_vagons, beta_vagons = (adist_vagons, bdist_vagons)
-    vagons_params = pyro.sample(
-        "param_vagons", pdist.Uniform(alpha_vagons, beta_vagons))
+    with pyro.plate("pvagons_plate_guide", size=alpha_vagons.shape[0]): 
+        vagons_params = pyro.sample(
+            "param_vagons", pdist.Uniform(alpha_vagons, beta_vagons))
     if dbg:
         print("\nalpha_vagons:")
         print(alpha_vagons)
@@ -270,8 +276,9 @@ def guide_model0(obs_flips, obs_coins, obs_boxes, obs_vagons, dbg=False):
             bhigh_bound*torch.ones((3, 4))).sample(),
         constraint=constraints.interval(blow_bound, bhigh_bound))
     alpha_boxes, beta_boxes = (adist_boxes, bdist_boxes)
-    boxes_params = pyro.sample(
-        "param_boxes", pdist.Uniform(alpha_boxes, beta_boxes))
+    with pyro.plate("pboxes_plate0_guide", size=alpha_boxes.shape[1]), pyro.plate("pboxes_plate1_guide", size=alpha_boxes.shape[0]):
+        boxes_params = pyro.sample(
+            "param_boxes", pdist.Uniform(alpha_boxes, beta_boxes))
     if dbg:
         print("\nalpha_boxes:")
         print(alpha_boxes)
@@ -301,8 +308,9 @@ def guide_model0(obs_flips, obs_coins, obs_boxes, obs_vagons, dbg=False):
             blow_bound*torch.ones(4), bhigh_bound*torch.ones(4)).sample(),
         constraint=constraints.interval(blow_bound, bhigh_bound))
     alpha_coins, beta_coins = (adist_coins, bdist_coins)
-    coins_params = pyro.sample(
-        "param_coins", pdist.Uniform(alpha_coins, beta_coins))
+    with pyro.plate("pcoins_plate_guide", size=alpha_coins.shape[0]):  
+        coins_params = pyro.sample(
+            "param_coins", pdist.Uniform(alpha_coins, beta_coins))
     if dbg:
         print("\nalpha_coins:")
         print(alpha_coins)
@@ -331,8 +339,9 @@ def guide_model0(obs_flips, obs_coins, obs_boxes, obs_vagons, dbg=False):
         constraint=constraints.interval(blow_bound, bhigh_bound))
     alpha_flips, beta_flips = (adist_flips, bdist_flips)
 
-    flips_params = pyro.sample(
-        "param_flips", pdist.Uniform(alpha_flips, beta_flips))
+    with pyro.plate("pflips_plate_guide", size=alpha_flips.shape[0]):
+        flips_params = pyro.sample(
+            "param_flips", pdist.Uniform(alpha_flips, beta_flips))
 
     if dbg:
         print("\nalpha_flips:")
@@ -385,16 +394,17 @@ def train(init_data, steps_counts=3, obs_counts=10, hso=0):
     # set up the optimizer
     # adam_params = {"lr": 0.0001}
     adam_params = {"lr": 0.0001, "betas": (0.90, 0.999)}
-    adam_params1 = {"lr": 0.01, "betas": (0.90, 0.999)}
+    adam_params1 = {"lr": .1, "betas": (0.90, 0.999)}
     optim_adam = Adam(adam_params1)
-    optim_sgd1 = pyro.optim.SGD({"lr": 0.001, "momentum":0.1})
-    optim_sgd2 = pyro.optim.SGD({"lr": 0.01, "momentum":0.1})
-    optim_sgd3 = pyro.optim.SGD({"lr": 0.1, "momentum":0.1})
+    optim_sgd1 = pyro.optim.SGD({"lr": 0.001, "momentum": 0.1})
+    optim_sgd2 = pyro.optim.SGD({"lr": 0.01, "momentum": 0.1})
+    optim_sgd3 = pyro.optim.SGD({"lr": 0.1, "momentum": 0.1})
+    # optim_sgd4 = pyro.optim.SGD({"lr": 100.0, "momentum": 0.})
 
     # elbo = TraceEnum_ELBO(max_plate_nesting=1)
     # setup the inference algorithm
     # svi = SVI(cond_model0, guide_model0, optimizer, loss=elbo)
-    svi = SVI(cond_model0, guide_model0, optim_sgd3, loss=Trace_ELBO())
+    svi = SVI(cond_model0, guide_model0, optim_adam, loss=Trace_ELBO())
 
     elbo = Trace_ELBO()
     # import pdb; pdb.set_trace()
