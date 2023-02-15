@@ -9,16 +9,19 @@ from pyro.poutine.runtime import effectful
 from pyro.poutine.runtime import _PYRO_STACK
 
 from collections import OrderedDict
+from itertools import combinations
 
 import torch.distributions.constraints as constraints
 from torch.functional import F
 from pyro.infer import MCMC, NUTS
 
+import matplotlib.pyplot as plt
+
 
 class EventsHandler(TraceMessenger):
     '''In order to affect scores the `factor` attribute will be given
     to context of each event, which could be changed by event registred
-    handler. This factor will affect pyro.factor call during exiting
+    handler. This factor will affect the `pyro.factor` call during exiting
     the context.
 
     Has predefined exit event with same name. So do not use it
@@ -30,19 +33,35 @@ class EventsHandler(TraceMessenger):
         if type(init_factor) != torch.Tensor:
             init_factor = torch.tensor(init_factor).type(torch.float)
         self.init_factor = init_factor
+        self.final_factors = []
 
         # python self will allow to do that:
         self.eregister("exit")(self._goal_exit)
-        
+        self.eregister("force_exit")(self._force_exit)
         TraceMessenger.__init__(self, *args, **kwargs)
 
-    def get(self, type):
-        '''To get primitives of given type from the `self.trace`'''
+    def get(self, type, msgs_cond=None):
+        '''To get primitives of given type from the `self.trace`
+        - ``msgs_cond``-- function::msg->Bool,
+        applied only if type is matched'''
+
         msgs = self.trace.nodes.copy()
+
+        def test(msg):
+            cond = msg["type"] == type
+            if not cond:
+                return False
+            if msgs_cond is not None:
+                cond = cond and msgs_cond(msg)
+            return cond
         sites_names = list(filter(
-            lambda msg_key: msgs[msg_key]["type"] == type, msgs))
+            lambda msg_key: test(msgs[msg_key]), msgs))
+            
         sites_msgs = [msgs[key] for key in sites_names]
         return (sites_names, sites_msgs)
+
+    # def __enter__(self):
+    #     return TraceMessenger.__enter__(self)
 
     def __exit__(self, exc_type, exc_value, traceback):
         '''The scores will be only computed here (by pyro.factor),
@@ -93,15 +112,38 @@ class EventsHandler(TraceMessenger):
             return True
         return TraceMessenger.__exit__(self, exc_type, exc_value, traceback)
 
+    def _force_exit(self, econtext, msg, trace):
+        
+        if econtext["dbg"]:
+            print("from _force_exit ehandler: exiting")
+
+        msg["done"] = True
+        msg["stop"] = True
+
+        # import pdb; pdb.set_trace()
+        def cont(m):
+            # to protect memory recursion:
+            econtext["msg"] = None
+            # m["observation_state_context"] = econtext
+            # MY:
+            # print("continuation site m:", m)
+            raise NonlocalExit(m)
+        msg["continuation"] = cont
+        # raise NonlocalExit("goal achived")
+        return econtext
+
     def _goal_exit(self, econtext, msg, trace):
         '''Will be called at the end of `with ehandler` statements.
         Do not use observe and trigger effectful computations here,
         only pyro.sample (factor) or pyro.param (they do not been watched
         by `ehandler._process_message`).
+        Added final factors to `self.final_factors` to collect the losses
+        during mcmc training.
         '''
         if econtext["dbg"]:
             print("from goal_exit")
         pyro.factor("event_error_factor", econtext["factor"])
+        # self.final_factors.append(econtext["factor"])
         
     def observe(self, oname, events=[], state_context={}, dbg=False):
         '''Same as the `effectful_observe` but with the keyword args given
@@ -118,7 +160,7 @@ class EventsHandler(TraceMessenger):
 
         - ``observation_state_context`` -- what will be given to
         each called event. Will be given to msg["value"].
-        
+        If has `factor` inside it will be used as `init_factor`
         '''
         observation_state_context = state_context
         events_ordered = OrderedDict()
@@ -126,7 +168,11 @@ class EventsHandler(TraceMessenger):
             events_ordered[ename] = None
         observation_state_context["events_to_check"] = events_ordered
         observation_state_context["dbg"] = dbg
-        observation_state_context["factor"] = self.init_factor
+
+        # supposed that `observe` not used inside
+        # (use `_observe` if needed)
+        if "factor" not in observation_state_context:
+            observation_state_context["factor"] = self.init_factor
         return self.effectful_observe(
             name=oname, obs=observation_state_context,
             no_context_name=oname,
@@ -152,9 +198,17 @@ class EventsHandler(TraceMessenger):
     def trigger(self, ename, econtext, dbg=False):
         '''Same as `effectful_trigger` but with the keyword args given
         which required for the `effectful` decorator
-        (see it source in 'pyro/poutine/runtime.py').'''
+        (see it source in 'pyro/poutine/runtime.py').
+
+        - ``econtext`` -- If has `factor` inside it will be used
+        as `init_factor`.
+        '''
         econtext["dbg"] = dbg
-        econtext["factor"] = self.init_factor
+
+        # supposed that `trigger` not used inside
+        # (use `_trigger` if needed)
+        if "factor" not in econtext:
+            econtext["factor"] = self.init_factor
         
         return self.effectful_trigger(name=ename, obs=econtext,
                                       no_context_name=ename,
@@ -198,7 +252,6 @@ class EventsHandler(TraceMessenger):
         '''As opposite to the `observe` method above this function
         will be called inneraly during prociding of a `_PYRO_STACK`.
         See the `_process_message` func below.'''
-
         events = observation_state_context["events_to_check"]
         for ename in filter(
                 lambda ename: ename in events,
@@ -282,18 +335,39 @@ class EventsHandler(TraceMessenger):
         return wrapper
 
 
-def mk_ehandler(init_factor):
+def mk_ehandler(init_factor, goalAtest, goalBtest, scores):
+    '''
+    # Example of EventsHandler usage for simple decision problem.
+
+    Supposing that (x0, y0) looks as:
+    ::
+       x0 = torch.tensor([3, 3, 0, 0, 4])
+       y0 = torch.tensor([0, 1, 4,  4, 0])
+
+    - ``init_factor`` -- will be given to as init to all in
+    the `with self` context.
+
+    - ``goal{A,B}test`` -- is func of x, y.
+    - ``scores`` -- list contained from dicts of conditions
+    to change the factor with, each of with contain the attributes:
+       1. "test" - function :: (goalA, goalB) -> Bool 
+    describing when to change facotor (True) or not (False).
+       2. "once" - if test shuld be applied only once in all
+    computation history (i.e. inside `with self` context).
+       3. "factor" - value at which `econtext["factor"]` will be increased
+    additively.
+       4. "exit" - if True will exiting from farther computation
+    by raising the `NonlocalExit` error.
+    '''
+    
     ehandler = EventsHandler(init_factor)
 
     @ehandler.eregister("goalA")
     def goalA(econtext, msg, trace):
-        '''Supposing:
-        x0 = torch.tensor([3, 3, 0, 0, 4]),
-        y0 =   torch.tensor([0, 1, 4,  4, 0])
-        '''
         x = econtext["x"]
         y = econtext["y"]
-        goal = y[1] <= 0 and y[2] <= 0 and x[-1] > 2
+        goal = goalAtest(x, y)
+        # goal = y[1] <= 0 and y[2] <= 0 and x[-1] > 2
         # if goal:
         #     pyro.factor("Ax", +1000)
         if econtext["dbg"]:
@@ -311,7 +385,8 @@ def mk_ehandler(init_factor):
         '''       
         x = econtext["x"]
         y = econtext["y"]
-        goal = x[1] <= 0 and x[-1] <= 0 and y[3] >= 2
+        goal = goalBtest(x, y)
+        # goal = x[1] <= 0 and x[-1] <= 0 and y[3] >= 2
         if econtext["dbg"]:
             print("goalB:", goal)
         # if goal:
@@ -327,10 +402,37 @@ def mk_ehandler(init_factor):
         
         # oname = msg["name"]
         events_to_check = econtext["events_to_check"]
-        goalA = events_to_check["goalA"]
-        goalB = events_to_check["goalB"]
-        onames, omsgs = ehandler.get("observation")
+        goalAres = events_to_check["goalA"]
+        goalBres = events_to_check["goalB"]
+        onames, omsgs = ehandler.get(
+            "observation",
+            (lambda msg: "goalA" in msg["value"]["events_to_check"]
+             and "goalB" in msg["value"]["events_to_check"]))
 
+        goal_triggered = False
+        for score in scores:
+            # usage of trace:
+            if score["once"]:
+                # to check if `score["test"]` been observed
+                # in computation history:
+                been_observed = len(list(filter(
+                    lambda msg: (score["test"](
+                        msg["value"]["events_to_check"]["goalA"],
+                        msg["value"]["events_to_check"]["goalB"])),
+                    omsgs))) != 0
+            else:
+                been_observed = False
+            if not been_observed:
+                if score["test"](goalAres, goalBres):
+                    if score["exit"]:
+                        goal_triggered = True
+                        econtext["factor"] = score["factor"]
+                        break
+                    if econtext["factor"]+score["factor"] < 0:
+                        econtext["factor"] += score["factor"]
+                    else:
+                        econtext["factor"] = 0
+        '''
         # usage of trace:
         # not goalA and not goalB been observed in computation history:
         notA_and_notB_been_observed = len(list(filter(
@@ -341,8 +443,9 @@ def mk_ehandler(init_factor):
             lambda msg: (not msg["value"]["events_to_check"]["goalA"]
                          and msg["value"]["events_to_check"]["goalB"]),
             omsgs))) != 0
-
-        # TODO: collect factors and apply it only to the end
+        '''
+        '''
+        # collect factors and apply it only to the end
         # since msg.copy used in trace.add_node(msg["value"], msg.copy())
         # (called separately in mcmc and others)
         # we need to collect factor until the end!
@@ -352,8 +455,7 @@ def mk_ehandler(init_factor):
             goal_triggered = True
         elif not goalA and goalB:
             if not notA_and_B_been_observed:
-                econtext["factor"] -= 1000
-            
+                econtext["factor"] -= 1000 
         elif not goalA and not goalB:
             if not notA_and_notB_been_observed:
                 
@@ -365,6 +467,7 @@ def mk_ehandler(init_factor):
                 pass
                 # print("notA_and_notB_been_observed!")
         # goal_triggered = False
+        '''
         if econtext["dbg"]:
             print("goalAoverB:", goal_triggered)
 
@@ -402,11 +505,287 @@ def mk_ehandler(init_factor):
     return ehandler
 
 
-def model(x0, y0, U, T, dt, Ax=None, Ay=None, ehandler=None,
-          mdbg=False, edbg=False):
+def show_model_trace(ehandler, keys):
+    print("\ntrace:")
+    for key in keys:
+        if key in ehandler.trace.nodes:
+            if "A" in key:
+                print("\n"+key[:2])
+                A = ehandler.trace.nodes[key]["value"]
+                A = F.normalize(A.T, p=1, dim=0)
+                print(A)
+            else:
+                print("\n"+key)
+                print(ehandler.trace.nodes[key]["value"])
+    print("\nevent_error_factor:")
+    factor = ehandler.trace.nodes["event_error_factor"]
+    factor_value = factor["value"]
+    factor_log = factor["fn"].log_prob(factor_value)
+    print(factor_log)
+    
+
+def show_model_last_state_context(ehandler, keys, observation_name=None):
+    observations = ehandler.get(
+        "observation", (lambda msg: msg["name"] == observation_name)
+        if observation_name is not None else None)
+    print("\nobservations state_context::")
+    if len(observations[1]) == 0:
+        print("no observations to show")
+        return
+    last_state_context = observations[1][-1]["value"]
+    for key in keys:
+        if key in last_state_context:
+            print("\n"+key)
+            print(last_state_context[key])
+        elif key in observations[1][-1]:
+            print("\n"+key)
+            print(observations[1][-1][key])
+        
+
+def collect_mcmc_result(mcmc, idx=-1, dbg=True):
+    '''To collect the results of  mcmc.
+    - ``idx`` -- index of result to be collected. '''
+
+    result = mcmc.get_samples()
+    test_spec = {}
+    for key in result:
+        if "A" in key:
+            A = result[key][idx]
+            A = F.normalize(A.T, p=1, dim=0)
+            test_spec[key[:2]] = A
+            
+            if dbg:
+                print("\n"+key[:2])
+                print(A)
+        else:
+            test_spec[key] = result[key][idx]
+
+            if dbg:
+                print("\n"+key)
+                print(test_spec[key])
+    return test_spec
+
+
+def get_utypes(sim_spec, idx):
+    sample_space = list(combinations(
+        sim_spec["possible_types"], sim_spec["chosen_count"]))
+    return sample_space[idx]
+
+
+def update_utypes(sim_spec, test_spec, side):
     '''
-    - ``Ax, Ay`` --  is optional for a test purpose.
+    Update `sim_spec` from the `test_spec`.
+
+    - ``side`` -- either A or B.
     '''
+    if ("types" not in sim_spec["agents"][side]["units"]
+        or ("types" in sim_spec["agents"][side]["units"]
+            and sim_spec["agents"][side]["units"]["types"] is None)):
+        chosen = test_spec[
+            side.lower() + "_utype_sample_space_size"].type(torch.long)
+        sim_spec["agents"][side]["units"]["types"] = get_utypes(
+            sim_spec["agents"][side]["units"], chosen)
+    return sim_spec
+
+
+def update_spec(sim_spec, mcmc, idx=-1, side="A", dbg=False):
+    '''Update `sim_spec` from mcmc result.'''
+
+    test_spec = collect_mcmc_result(mcmc, idx=-1, dbg=dbg)
+    if dbg:
+        print("\ntest_spec:")
+        print(test_spec)
+    sim_spec = update_utypes(sim_spec, test_spec, side)
+    value = "x" if side == "A" else "y"
+
+    sim_spec["agents"][side]["decision_matrix"] = test_spec["A"+value]
+    if value+"0" in test_spec:
+        sim_spec["agents"][side]["units"]["counts"] = test_spec[value+"0"]
+    if dbg:
+        print("updated sim_spec:")
+        print(sim_spec["agents"][side])
+    return sim_spec
+
+
+def model(model_spec, losses=None, mdbg=False, edbg=False):
+    '''Should only be run in `with ehandler` context'''
+    T = model_spec["T"]
+    dt = model_spec["dt"]
+    aSpec = model_spec["agents"]["A"]
+    bSpec = model_spec["agents"]["B"]
+    U = model_spec["U"]
+
+    init_factor = model_spec["init_factor"]
+    ehandler = mk_ehandler(
+        init_factor, aSpec["goal"], bSpec["goal"],
+        model_spec["scores"])
+    # scores = []
+    with ehandler:
+        x0, y0, Ua, Ub, Ax, Ay = init_model(aSpec, bSpec, U, ehandler, mdbg)
+        
+        run_model(x0, y0, Ua, Ub, T, dt, Ax=Ax, Ay=Ay,
+                  ehandler=ehandler,
+                  mdbg=mdbg, edbg=edbg)
+        # all attempts of mcmc will be collected here:
+        # scores.extend(filter(lambda x: x["name"]=='event_error_factor',
+        #                      ehandler.get("sample")[1]))
+    if losses is not None:
+        losses.extend(ehandler.final_factors)
+    return(ehandler)
+
+
+def init_model(aSpec, bSpec, U, ehandler, mdbg):
+    '''To Initialize the model from its spec.'''
+    # initiate_sim:
+    aUnits = aSpec["units"]
+    bUnits = bSpec["units"]
+    aUtypes, x0 = mk_units(aUnits, "a_utype_sample_space_size", "x0", ehandler)
+    bUtypes, y0 = mk_units(bUnits, "b_utype_sample_space_size", "y0", ehandler)
+    if mdbg:
+        print("aUtypes:")
+        print(aUtypes)
+        print("x0:", x0)
+        print("bUtypes:")
+        print(bUtypes)
+        print("y0:", y0)
+        
+    Ua, Ub = make_U(U, aUtypes, bUtypes, mdbg)
+    Ax = aSpec["decision_matrix"]
+    Ay = bSpec["decision_matrix"]
+
+    Ax, Ay = mk_decisions(Ax, Ay, x0, y0, mdbg)
+
+    return (x0, y0, Ua, Ub, Ax, Ay)
+
+
+def mk_units(units_spec, utypes_name, ucounts_name, ehandler):
+    '''Will create/sample units types, if they not given in units_spec,
+    and units counts, for the same reason.
+    If the "types" not given then also and "count" should not.
+    - ``units_spec`` -- if have no "types" attribute, must contain
+    the "possible_types" one, which will describe possible types
+    (the sample space) for `utypes`.
+
+    - ``utypes_name`` -- used for `pyro.sample` name of `utypes`.
+    (ex: "aU").
+
+    - ``ucounts_name`` -- used for `pyro.sample` name of `ucounts`.
+    (ex: "x0").
+    '''
+    if "types" not in units_spec or units_spec["types"] is None:
+        assert "possible_types" in units_spec
+        assert units_spec["possible_types"] is not None
+        assert "chosen_count" in units_spec
+        assert units_spec["chosen_count"] is not None
+        assert units_spec["chosen_count"] <= len(units_spec["possible_types"])
+
+        ptypes = units_spec["possible_types"]
+        n = units_spec["chosen_count"]
+
+        sample_space = list(combinations(ptypes, n))
+
+        '''
+        if type(ptypes) is list:
+            ptypes = torch.tensor(ptypes).type(torch.long)
+        bptypes = torch.tensor([False]*n).type(torch.bool)
+        bptypes[ptypes] = True
+        utypes = torch.arange(0, n)[
+            (bptypes == True).logical_and(chosen >= 0.5)]
+        '''
+        chosen = pyro.sample(
+            utypes_name, pdist.Uniform(0, len(sample_space)))
+        utypes = sample_space[chosen.type(torch.long)]
+
+        # another usage of observe effectful. No event, just context:
+        ehandler.observe(
+            "sample_space_with_size_"+utypes_name,
+            state_context={"utypes": utypes},
+            dbg=False)
+
+        if len(utypes) == 0:
+            # exit with no father work (by raising `NonlocalExit`)
+            ehandler.trigger("force_exit", {"factor": -500}, True)
+            # should not been here in the `with` context
+            assert False
+    else:
+        utypes = units_spec["types"]
+    
+    if "counts" not in units_spec or units_spec["counts"] is None:
+        # n = len(utypes)
+        # print("--------counts n-------")
+        # print(n)
+        # with pyro.plate(ucounts_name+"_plate", size=n):
+        assert "max_count" in units_spec
+        assert units_spec["max_count"] is not None
+        max_count = units_spec["max_count"]
+
+        # if types given they size will be used for
+        # counts vector size.
+        # Otherwise chosen_count param will be used:
+        if "types" in units_spec and units_spec["types"] is not None:
+            n = len(units_spec["types"])
+        else:
+            assert units_spec["chosen_count"] is not None
+            if ("possible_types" in units_spec
+                and units_spec["possible_types"] is not None):
+                assert (units_spec["chosen_count"]
+                        <= len(units_spec["possible_types"]))
+            n = units_spec["chosen_count"]
+
+        ucounts = pyro.sample(
+            ucounts_name, pdist.Uniform(
+                torch.zeros(n), max_count*torch.ones(n)))
+        # print(ucounts)
+    else:
+        ucounts = units_spec["counts"]
+    
+    return (utypes, ucounts)
+
+
+def make_U(U, aUnits, bUnits, dbg):
+    '''Return efficiency matrix only for
+    given units A and B.'''
+    
+    if dbg:
+        print("U: ")
+        print(U)
+
+    idxsA = list(set(aUnits))
+    idxsB = list(set(bUnits))
+    Ua = torch.cat(list(
+        map(lambda x: x.unsqueeze(0),
+            [U[a].index_select(0, torch.tensor(idxsB)) for a in idxsA])))
+    Ub = torch.cat(list(
+        map(lambda x: x.unsqueeze(0),
+            [U[a].index_select(0, torch.tensor(idxsA)) for a in idxsB])))
+
+    # U set by U[k][:] like k against [:] (all)
+    # but we need it to pairwise mult with
+    # A[:][k] decis. matrix for each k (how many of k attack [:] (all))
+    # so We use U1.T here:
+    Ua = Ua.T
+    Ub = Ub.T
+    '''
+    idxs = list(set(list(aUnits)+list(bUnits)))
+    U1 = torch.cat(list(
+        map(lambda x: x.unsqueeze(0),
+            [U[a].index_select(0, torch.tensor(idxs)) for a in idxs])))
+    '''
+    if dbg:
+        print("Ua=U[aUnits][bUnits].T=U[%s][%s].T:"
+              % (str(aUnits), str(bUnits)))
+        print(Ua)
+        print("Ub=U[bUnits][aUnits].T=U[%s, %s].T:"
+              % (str(bUnits), str(aUnits)))
+        print(Ub)
+        
+    return (Ua, Ub)
+
+
+def mk_decisions(Ax, Ay, x0, y0, mdbg):
+    '''To sample (Ax_T, Ay_T), if they not given. Will return
+    normalized (Ax, Ay) in that case. (if they is they should be alredy)'''
+
     if Ax is None:
         # why `_T` is used here see description in `elbo_guide`:
         Ax_T_shape = (len(x0), len(y0))  # should be (len(y0), len(x0)) for Ax
@@ -434,25 +813,35 @@ def model(x0, y0, U, T, dt, Ax=None, Ay=None, ehandler=None,
         if mdbg:
             print("Ay:")
             print(Ay)
+    return (Ax, Ay)
 
+
+def run_model(x0, y0, Ua, Ub, T, dt, Ax=None, Ay=None, ehandler=None,
+              mdbg=False, edbg=False):
     if mdbg:
         print("x0:", x0)
         print("y0:", y0)
 
+    x_prev = x0.detach().clone()
+    y_prev = y0.detach().clone()
     x = x0.detach().clone()
     y = y0.detach().clone()
-
     for t in range(T):
         
-        x -= dt*torch.matmul(torch.mul(U, Ay), y)
+        x -= dt*torch.matmul(torch.mul(Ub, Ay), y_prev)
         x[x < 0] = 0.
         x[x > x0] = x0[x > x0][:]
         if mdbg:
             print("x:", x)
 
-        y -= dt*torch.matmul(torch.mul(U, Ax), x)
+        y -= dt*torch.matmul(torch.mul(Ua, Ax), x_prev)
         y[y < 0] = 0.
         y[y > y0] = y0[y > y0][:]
+
+        # only now We can do that
+        x_prev = x
+        y_prev = y
+
         if mdbg:
             print("y:", y)
             print("-------")
@@ -460,7 +849,15 @@ def model(x0, y0, U, T, dt, Ax=None, Ay=None, ehandler=None,
             ehandler.observe(
                 "observation_%d" % t,
                 events=["goalA", "goalB", "goalAoverB", "exit?"],
-                state_context={"x": x, "y": y},
+                state_context={
+                    "x": x, "y": y,
+
+                    # adding here since pyro.sample only `*_candidates`:
+                    "Ua": Ua, "Ub": Ub,
+
+                    "Ax": Ax,
+                    # adding here since `torch.sample` (not `pyro` one)
+                    "Ay": Ay},
                 dbg=edbg)
     if mdbg:
         print("result of x:")
@@ -480,36 +877,15 @@ def elbo_guide(x0, y0, goal, U, T, Ax=None, Ay=None):
     pyro.param("Ay_T", torch.ones(Ay_T_shape), constraint=constraints.simplex)
 
 
-def make_U(aUnits, bUnits):
-    '''Return efficiency matrix only for
-    given units A and B.'''
-    # efficiency matrix:
-    U = 0.1*torch.ones((8, 8))
-    U[0][:3] = torch.tensor([0.7, 0.8, 0.3])
-    U[1][2:] = torch.tensor([0.3, 0.5, 0.9, 0.9, 0.9, 0.2])
-    U[2][:4] = torch.tensor([0.9, 0.9, 0.5, 0.2])
-    U[3][2:-1] = torch.tensor([0.9, 0.5, 0.7, 0.7, 0.7])
-    U[4][:] = torch.tensor([0.6, 0.7, 0.9, 0.9, 0.5, 0.5, 0.5, 0.2])
-    U[5][:] = torch.tensor([0.9, 0.9, 0.6, 0.4, 0.1, 0.1, 0.1, 0.1])
-    U[6][4:] = torch.tensor([0.9, 0.9, 0.9, 0.5])
-    U[7][4:] = torch.tensor([0.9, 0.9, 0.9, 0.7])
+def test_mk_U(dbg=True):
     
-    print("U: ")
-    print(U)
-    
-    idxs = list(set(list(aUnits)+list(bUnits)))
-    return torch.cat(list(
-        map(lambda x: x.unsqueeze(0),
-            [U[a].index_select(0, torch.tensor(idxs)) for a in idxs])))
+    print("make_U([0, 1, 4], [3, 7]):")
+    make_U([0, 1, 4], [3, 7], dbg)
 
 
-def test_mk_model():
-    
-    print("make_U([0, 1, 4], [2, 3]):")
-    U1 = make_U([0, 1, 4], [2, 3])
-    print(U1)
-    model(torch.tensor([3, 3, 0, 0, 4]),
-          torch.tensor([0, 1, 4,  4, 0]), U1.T, 1)
+def test_mk_model(model_spec, losses, mdbg, edbg):
+    ehandler = model(model_spec, losses=losses, mdbg=mdbg, edbg=edbg)
+    return ehandler
 
 
 def test_ehandler(dbg=True):
@@ -521,13 +897,17 @@ def test_ehandler(dbg=True):
         print("econtext of event %s is:" % (ename))
         print(econtext)
 
+    print("FOR without context:")
     ehandler.trigger("jump", {"last_state": "on surface"}, dbg=dbg)
+    print("END FOR without context")
     
+    print("FOR with context:")
     pyro.clear_param_store()
     with ehandler:
         ehandler.trigger("jump", {"last_state": "on surface"}, dbg=dbg)
         # print("_PYRO_STACK:")
         # print(_PYRO_STACK)
+    print("END FOR with context")
 
 
 def test_inference(T, dt=0.01, mdbg=True, edbg=True):
@@ -570,43 +950,174 @@ def test_inference(T, dt=0.01, mdbg=True, edbg=True):
     print("END FOR testing with the context")
 
 
-def test_mcmc(steps, T=10, dt=0.5, Ay=None, mdbg=False, edbg=False):
+def test_mcmc(steps, sim_spec, mdbg=False, edbg=False):
 
     pyro.clear_param_store()
-
-    init_factor = -110.0
     
-    U1 = make_U([0, 1, 4], [2, 3])
-    x0 = torch.tensor([3, 3, 0, 0, 4]).type(torch.float)
-    y0 = torch.tensor([0, 1, 4,  4, 0]).type(torch.float)
-    ehandler = mk_ehandler(init_factor)
-
-    def emodel(*args, **kwargs):
-        with ehandler:
-            model(*args, ehandler=ehandler, **kwargs)
-            
-    nuts_kernel = NUTS(emodel)
+    # U1 = make_U([0, 1, 4], [2, 3])
+    # x0 = torch.tensor([3, 3, 0, 0, 4]).type(torch.float)
+    # y0 = torch.tensor([0, 1, 4,  4, 0]).type(torch.float)
+    # ehandler = mk_ehandler(init_factor)
+    
+    nuts_kernel = NUTS(model)
     mcmc = MCMC(
             nuts_kernel,
             num_samples=steps,
             # warmup_steps=1,
             num_chains=1,)
-
-    mcmc.run(x0, y0, U1.T, T, dt, Ay=Ay,  # ehandler=ehandler,
-             mdbg=mdbg, edbg=edbg)
+    losses = []
+    mcmc.run(sim_spec, losses=losses, mdbg=mdbg, edbg=edbg)
+    # mcmc.run(x0, y0, U1.T, T, dt, Ay=Ay,  # ehandler=ehandler,
+    #          mdbg=mdbg, edbg=edbg)
     # mcmc.run(torch.ones(3))
-    print(mcmc.summary())
-    return(mcmc, ehandler)
+    if mdbg:
+        print(mcmc.summary())
+    return(mcmc, losses)
 
 
 if __name__ == "__main__":
-    mcmc, ehandler = test_mcmc(10, T=10, dt=0.5, Ay=None, mdbg=False, edbg=False)
-    # TODO:
+    
+    # efficiency matrix:
+    U = 0.1*torch.ones((8, 8))
+    U[0][:3] = torch.tensor([0.7, 0.8, 0.3])
+    U[1][2:] = torch.tensor([0.3, 0.5, 0.9, 0.9, 0.9, 0.2])
+    U[2][:4] = torch.tensor([0.9, 0.9, 0.5, 0.2])
+    U[3][2:-1] = torch.tensor([0.9, 0.5, 0.7, 0.7, 0.7])
+    U[4][:] = torch.tensor([0.6, 0.7, 0.9, 0.9, 0.5, 0.5, 0.5, 0.2])
+    U[5][:] = torch.tensor([0.9, 0.9, 0.6, 0.4, 0.1, 0.1, 0.1, 0.1])
+    U[6][4:] = torch.tensor([0.9, 0.9, 0.9, 0.5])
+    U[7][4:] = torch.tensor([0.9, 0.9, 0.9, 0.7])
+
+    A_spec = {
+        "decision_matrix": None,
+        "units": {
+
+            # needed only if there is neither types nor counts given:
+            "possible_types": [0, 1, 2, 3, 4],
+            "chosen_count": 3,
+            # "types": [0, 1, 4],
+
+            # "counts": torch.tensor([3, 3, 4]).type(torch.float)
+            # maximal amount of units to sample for any type
+            # must be given if "counts" not: 
+            "max_count": 4,
+        },
+        "goal": lambda x, y: (y <= 0).all(),
+        ## "goal": lambda x, y: y[1] <= 0 and y[2] <= 0
+        # "goal": lambda x, y: y[0] <= 0 and y[1] <= 0 and x[-1] > 2
+    }
+    B_spec = {
+        "decision_matrix": None,
+        "units": {
+            "types": [1, 2, 3],
+            "counts": torch.tensor([1, 4,  4]).type(torch.float)
+        },
+        "goal": lambda x, y: (x <= 0).all() and y[2] >= 2
+        # "goal": lambda x, y: x[1] <= 0 and x[-1] <= 0,  # and y[2] >= 2
+    }
+
+    sim_spec = {
+        "agents": {"A": A_spec, "B": B_spec},
+
+        "T": 30,
+        "dt": 0.5,
+        # "dt": 0.5,
+        "init_factor": -110.0,
+
+        "U": U,
+
+        # choose side A (i.e. want A to win):
+        "scores": [
+            {
+                "test": lambda goalA, goalB: goalA and not goalB,
+                "once": False,
+                "factor": 0,
+                # will be exited once happend, factor been be overriden
+                "exit": True
+            },
+            {
+                "test": lambda goalA, goalB: not goalA and goalB,
+                "once": False,
+                "factor": -1000,
+                # will be exited once happend, factor been be overriden
+                "exit": True
+            },
+            {
+                "test": lambda goalA, goalB: not goalA and not goalB,
+                # only once from all times will factor been used  
+                "once": True,
+                "factor": 10,
+                "exit": False
+            }
+        ] 
+    }
+    
+    # FOR testing mcmc:
+    mcmc, losses = test_mcmc(30, sim_spec, mdbg=False, edbg=False)
+    losses_len = len(losses)
+    if losses_len > 0:
+        losses = torch.cat([
+            (torch.tensor(l).unsqueeze(0)
+             if type(l) != torch.Tensor else l.unsqueeze(0))
+            for l in losses]).numpy()
+        print("losses:")
+        print(losses_len)
+        plt.hist(losses)
+        plt.show()
+    # print("mcmc.get_samples:")
+    # print(mcmc.get_samples())
+    
+    # collect factors:
+    sim_spec = update_spec(sim_spec, mcmc, idx=-1, side="A", dbg=False)
+
+    losses = []
+    ehandler = test_mk_model(sim_spec, losses, False, False)
+    show_model_last_state_context(
+        ehandler, ["x", "y", "Ua", "Ub", "Ax", "Ay", "events_to_check"])
+    show_model_last_state_context(
+        ehandler, ["utypes"],
+        observation_name="sample_space_with_size_a_utype_sample_space_size")
+    show_model_trace(ehandler, ["x0", "Ax_T", "y0", "Ay_T"])
+    print("\nehanler.final_factors:")
+    print(ehandler.final_factors)
+    print("ehandler.final_factors:")
+    print(losses)
+    print("updated sim_spec (solution):")
+    print('sim_spec["agents"]["A"]')
+    print(sim_spec["agents"]["A"])
+    
+    # END FOR
+    
+    # no need for that: get_samples just return what
+    # already been done
     # ehandler1 = mk_ehandler()
     # with ehandler1:
     #    mcmc.get_samples()
     # print(ehandler1.get("sample"))
-    print("ehandler.trace.nodes:")
-    print(ehandler.get("sample"))
+    # print("ehandler.trace.nodes:")
+    # print(ehandler.get("sample"))
+    # print(mcmc.get_samples()["Ax_T"].shape)
+    # print("scores:")
+    # print(scores)
     # test_inference(10, 0.5, mdbg=True, edbg=False)
+    
+    
+    '''
+    # FOR testing model:
+    losses = []
+    ehandler = test_mk_model(sim_spec, losses, False, False)
+    show_model_last_state_context(
+        ehandler, ["x", "y", "Ua", "Ub", "Ay", "events_to_check"])
+    show_model_last_state_context(
+        ehandler, ["utypes"],
+        observation_name="sample_space_with_size_a_utype_sample_space_size")
+    show_model_trace(ehandler, ["x0", "Ax_T", "y0", "Ay_T"])
+    print("\nehanler.final_factors:")
+    print(ehandler.final_factors)
+    print("ehandler.final_factors:")
+    print(losses)
+    # END FOR
+    '''
+    
     # test_ehandler(dbg=True)
+    # test_mk_U()
