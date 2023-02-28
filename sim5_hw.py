@@ -483,7 +483,7 @@ def mk_ehandler(init_factor, goalAtest, goalBtest, scores):
         '''
         
         if econtext["events_to_check"]["goalAoverB"]:
-
+            econtext["events_to_check"]["exit?"] = True
             if econtext["dbg"]:
                 print("from exit handler: exiting")
             # 
@@ -524,7 +524,14 @@ def show_model_trace(ehandler, keys):
     print(factor_log)
     
 
-def show_model_last_state_context(ehandler, keys, observation_name=None):
+def show_model_states_context(
+        ehandler, attrs_keys,
+        state_key=-1,  observation_name=None):
+    '''
+    # TODO: test.
+    - ``state_key`` if None, then mean values will be shown,
+    if int or -1 then will show the according value.'''
+
     observations = ehandler.get(
         "observation", (lambda msg: msg["name"] == observation_name)
         if observation_name is not None else None)
@@ -532,14 +539,30 @@ def show_model_last_state_context(ehandler, keys, observation_name=None):
     if len(observations[1]) == 0:
         print("no observations to show")
         return
-    last_state_context = observations[1][-1]["value"]
-    for key in keys:
-        if key in last_state_context:
-            print("\n"+key)
-            print(last_state_context[key])
-        elif key in observations[1][-1]:
-            print("\n"+key)
-            print(observations[1][-1][key])
+    if state_key is None:
+        for key in attrs_keys:
+            # check if key in ["value"]
+            # or directly in observation object
+            if key in observations[1][-1]["value"]:
+                if type(observations[1][-1]["value"][key]) == torch.Tensor:
+                    print("\nmean "+key)
+                    print(torch.mean(torch.cat(
+                        [obs["value"][key].unsqueeze(0)
+                         for obs in observations[1]]), 0))
+            elif key in observations[1][-1]:
+                if type(observations[1][-1][key]) == torch.Tensor:
+                    print("\nmean "+key)
+                    print(torch.mean(torch.cat(
+                        [obs[key].squeeze(0) for obs in observations[1]]), 0))
+    else:
+        last_state_context = observations[1][state_key]["value"]
+        for key in attrs_keys:
+            if key in last_state_context:
+                print("\n"+key)
+                print(last_state_context[key])
+            elif key in observations[1][state_key]:
+                print("\n"+key)
+                print(observations[1][state_key][key])
         
 
 def collect_mcmc_result(mcmc, idx=-1, dbg=True):
@@ -582,7 +605,7 @@ def update_utypes(sim_spec, test_spec, side):
         or ("types" in sim_spec["agents"][side]["units"]
             and sim_spec["agents"][side]["units"]["types"] is None)):
         chosen = test_spec[
-            side.lower() + "_utype_sample_space_size"].type(torch.long)
+            side.lower() + "_utypes"].type(torch.long)
         sim_spec["agents"][side]["units"]["types"] = get_utypes(
             sim_spec["agents"][side]["units"], chosen)
     return sim_spec
@@ -639,8 +662,8 @@ def init_model(aSpec, bSpec, U, ehandler, mdbg):
     # initiate_sim:
     aUnits = aSpec["units"]
     bUnits = bSpec["units"]
-    aUtypes, x0 = mk_units(aUnits, "a_utype_sample_space_size", "x0", ehandler)
-    bUtypes, y0 = mk_units(bUnits, "b_utype_sample_space_size", "y0", ehandler)
+    aUtypes, x0 = mk_units(aUnits, "a_utypes", "x0", ehandler)
+    bUtypes, y0 = mk_units(bUnits, "b_utypes", "y0", ehandler)
     if mdbg:
         print("aUtypes:")
         print(aUtypes)
@@ -698,7 +721,7 @@ def mk_units(units_spec, utypes_name, ucounts_name, ehandler):
 
         # another usage of observe effectful. No event, just context:
         ehandler.observe(
-            "sample_space_with_size_"+utypes_name,
+            "sample_space_of_"+utypes_name,
             state_context={"utypes": utypes},
             dbg=False)
 
@@ -718,23 +741,50 @@ def mk_units(units_spec, utypes_name, ucounts_name, ehandler):
         assert "max_count" in units_spec
         assert units_spec["max_count"] is not None
         max_count = units_spec["max_count"]
+        if type(max_count) == list:
+            max_count = torch.tensor(max_count).type(torch.float)
 
-        # if types given they size will be used for
-        # counts vector size.
-        # Otherwise chosen_count param will be used:
-        if "types" in units_spec and units_spec["types"] is not None:
-            n = len(units_spec["types"])
+        if "min_count" in units_spec and units_spec["min_count"] is not None:
+            min_count = units_spec["min_count"]
+            if type(min_count) == list:
+                min_count = torch.tensor(min_count).type(torch.float)
+
+            if type(max_count) == torch.Tensor and type(min_count) == torch.Tensor:
+                assert (min_count < max_count).all()
+            else:
+                assert min_count < max_count
         else:
-            assert units_spec["chosen_count"] is not None
-            if ("possible_types" in units_spec
-                and units_spec["possible_types"] is not None):
-                assert (units_spec["chosen_count"]
-                        <= len(units_spec["possible_types"]))
-            n = units_spec["chosen_count"]
+            min_count = (
+                torch.zeros_like(max_count)
+                if type(max_count) == torch.Tensor else 0.)
+        if type(max_count) == torch.Tensor:
+            ucounts = pyro.sample(
+                ucounts_name, pdist.Uniform(
+                    min_count, max_count))
+        else:
+            # if types given they size will be used for
+            # counts vector size.
+            # Otherwise chosen_count param will be used:
+            if "types" in units_spec and units_spec["types"] is not None:
+                n = len(units_spec["types"])
+            else:
+                assert units_spec["chosen_count"] is not None
+                if ("possible_types" in units_spec
+                    and units_spec["possible_types"] is not None):
+                    assert (units_spec["chosen_count"]
+                            <= len(units_spec["possible_types"]))
+                n = units_spec["chosen_count"]
 
-        ucounts = pyro.sample(
-            ucounts_name, pdist.Uniform(
-                torch.zeros(n), max_count*torch.ones(n)))
+            ucounts = pyro.sample(
+                ucounts_name, pdist.Uniform(
+                    min_count*torch.ones(n), max_count*torch.ones(n)))
+
+        # another usage of observe effectful. No event, just context:
+        ehandler.observe(
+            "counts_of_"+ucounts_name,
+            state_context={"ucounts": ucounts},
+            dbg=False)
+
         # print(ucounts)
     else:
         ucounts = units_spec["counts"]
@@ -877,6 +927,8 @@ def elbo_guide(x0, y0, goal, U, T, Ax=None, Ay=None):
     pyro.param("Ay_T", torch.ones(Ay_T_shape), constraint=constraints.simplex)
 
 
+# ########################### tests:
+
 def test_mk_U(dbg=True):
     
     print("make_U([0, 1, 4], [3, 7]):")
@@ -978,6 +1030,7 @@ def test_mcmc(steps, sim_spec, mdbg=False, edbg=False):
 if __name__ == "__main__":
     
     # efficiency matrix:
+    # (will be transposed)
     U = 0.1*torch.ones((8, 8))
     U[0][:3] = torch.tensor([0.7, 0.8, 0.3])
     U[1][2:] = torch.tensor([0.3, 0.5, 0.9, 0.9, 0.9, 0.2])
@@ -999,8 +1052,10 @@ if __name__ == "__main__":
 
             # "counts": torch.tensor([3, 3, 4]).type(torch.float)
             # maximal amount of units to sample for any type
-            # must be given if "counts" not: 
-            "max_count": 4,
+            # must be given if "counts" not:
+            "max_count": [3, 3, 2],
+            ## "min_count": 0,
+            ## "max_count": 4,
         },
         "goal": lambda x, y: (y <= 0).all(),
         ## "goal": lambda x, y: y[1] <= 0 and y[2] <= 0
@@ -1053,7 +1108,7 @@ if __name__ == "__main__":
     }
     
     # FOR testing mcmc:
-    mcmc, losses = test_mcmc(30, sim_spec, mdbg=False, edbg=False)
+    mcmc, losses = test_mcmc(10, sim_spec, mdbg=False, edbg=False)
     losses_len = len(losses)
     if losses_len > 0:
         losses = torch.cat([
@@ -1066,17 +1121,44 @@ if __name__ == "__main__":
         plt.show()
     # print("mcmc.get_samples:")
     # print(mcmc.get_samples())
-    
+
+    '''
+    print("\nFOR test original model:")
+    ehandler = test_mk_model(sim_spec, losses, False, False)
+    show_model_states_context(
+        ehandler, ["x", "y", "Ua", "Ub", "Ax", "Ay", "events_to_check"],
+        state_key=-1)
+    show_model_states_context(
+        ehandler, ["utypes"],
+        # None here means mean of all states
+        state_key=None,
+        observation_name="sample_space_of_a_utypes")
+    show_model_states_context(
+        ehandler, ["ucounts"],
+        # None here means mean of all states
+        state_key=None,
+        observation_name="counts_of_x0")
+    print("END FOR test original model")
+    '''
+
+    print("\nFOR testing inferenced model:")
     # collect factors:
     sim_spec = update_spec(sim_spec, mcmc, idx=-1, side="A", dbg=False)
 
     losses = []
     ehandler = test_mk_model(sim_spec, losses, False, False)
-    show_model_last_state_context(
-        ehandler, ["x", "y", "Ua", "Ub", "Ax", "Ay", "events_to_check"])
-    show_model_last_state_context(
+    show_model_states_context(
+        ehandler, ["x", "y", "Ua", "Ub", "Ax", "Ay", "events_to_check"],
+        state_key=-1)
+    show_model_states_context(
         ehandler, ["utypes"],
-        observation_name="sample_space_with_size_a_utype_sample_space_size")
+        state_key=-1,
+        observation_name="sample_space_of_a_utypes")
+    show_model_states_context(
+        ehandler, ["ucounts"],
+        state_key=-1,
+        observation_name="counts_of_x0")
+
     show_model_trace(ehandler, ["x0", "Ax_T", "y0", "Ay_T"])
     print("\nehanler.final_factors:")
     print(ehandler.final_factors)
@@ -1085,7 +1167,27 @@ if __name__ == "__main__":
     print("updated sim_spec (solution):")
     print('sim_spec["agents"]["A"]')
     print(sim_spec["agents"]["A"])
+    print("\nEND FOR testing inferenced model")
+
+    print("\nFOR factors hist:")
+    factors = []
+    losses = []
+    for i in range(10):
+        ehandler = test_mk_model(sim_spec, losses, False, False)
+        factor = ehandler.trace.nodes["event_error_factor"]
+        factor_value = factor["value"]
+        factor_log = factor["fn"].log_prob(factor_value)
+        factors.append(factor_log)
+
+    print("factors:")
+    print(torch.cat([factor.unsqueeze(0) for factor in factors]))
+    print("losses:")
+    print(losses)
     
+    plt.hist(factors, bins=15)
+    plt.title("factors")
+    plt.show()
+    print("\nEND FOR factors hist")
     # END FOR
     
     # no need for that: get_samples just return what

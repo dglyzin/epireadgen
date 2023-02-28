@@ -1,5 +1,6 @@
 import pyro
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
 
 from pyro.poutine.messenger import Messenger
@@ -7,7 +8,7 @@ from pyro.poutine.messenger import Messenger
 
 class Char(Messenger):
     
-    def __init__(self, trace, step, *args, **kwargs):
+    def __init__(self, step, trace=None, *args, **kwargs):
         
         self.step = step
 
@@ -41,18 +42,33 @@ class Char(Messenger):
         '''for updating msg. to plot interactivly for example. '''
         pass
 
-    def _plot(self, charname, all=False):
+    def _plot(self, charname, title, all=False):
+        '''
+        - ``all`` - if true the value for each from a space dimention
+        will be plotted, else only for a mid value.
+        '''
         C = self.results[charname].detach().numpy()
-        # print("C.shape", C.shape)
+        print("C.shape", C.shape)
         if all:
+            # plot for all space dimentions
             plt.plot(C[:, 0, :])
+            print("inf in C[:, 0, :]?:")
+            print(np.isinf(C[:, 0, :]).any())
+            
             plt.plot(C[:, 1, :])
+            print("inf in C[:, 1, :]?:")
+            print(np.isinf(C[:, 1, :]).any())
+            
         else:
             mid = C.shape[-1]//2
+            print("C[:, 0, mid]")
             print(C[:, 0, mid])
+            print("inf in C[:, 0, mid]?:")
+            print(np.isinf(C[:, 0, mid].any()))
             plt.plot(C[:, 0, mid], label="U")
             plt.plot(C[:, 1, mid], label="V")
         plt.legend(loc="upper left")
+        plt.title(title)
         plt.show()
 
 
@@ -62,7 +78,7 @@ class Correlation(Char):
     connected with each other'''
 
     def plot(self, all=False):
-        self._plot("C", all=all)
+        self._plot("C", "correlation", all=all)
 
     def __exit__(self, *args, **kwargs):
         uv = self.cat_results()
@@ -110,7 +126,7 @@ class Lyapunov(Char):
         Messenger.__exit__(self, *args, **kwargs)
 
     def plot(self, all=False):
-        self._plot("Lambda", all=all)
+        self._plot("Lambda", "Lyapunov $\lambda$", all=all)
 
     def update(self, name, time, value):
         uv = value
@@ -122,8 +138,8 @@ class Lyapunov(Char):
         elif len(uv[0].shape) == 3:
             uv1, uv0 = uv[:, 1:, 1:, 1:], uv[:, :-1, :-1, :-1]
         duv = uv1-uv0
-        # print("duv")
-        # print(duv)
+        print("duv:")
+        print(duv)
         # print("self.epsilon", self.epsilon)
         # print("time:", time)
         l = torch.log(torch.abs(duv)/self.epsilon)/time

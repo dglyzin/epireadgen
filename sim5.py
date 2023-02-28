@@ -283,8 +283,13 @@ class StackCleanerMessenger(Messenger):
             del value
             params = _PYRO_PARAM_STORE._params
             if name in params:
-                value = params.pop(name)
-                del value
+                # value = params.pop(name)
+                # del value
+                # this trigger __delitem__ of pyro.ParamStoreDict
+                # which in turn will remove from both constrained
+                # and unconstrained values
+                # REF: pyro/params/param_store.py
+                del _PYRO_PARAM_STORE[name]
         # self.show_series()
         # print("msg")
         # print(msg)
@@ -339,8 +344,10 @@ class SolverContextMessenger(TraceMessenger):
 
 
 class Model:
-    def __init__(self, t0=-1, t1=0, dt=0.01, cprogress=ProgressCmd):
+    def __init__(self, t0=-1, t1=0, dt=0.01, cprogress=ProgressCmd, dbg=True):
         
+        self.dbg = dbg
+
         # init_t = N.shape[0]
         # init_t = TN_init
         self.t0 = t0
@@ -351,11 +358,13 @@ class Model:
         # self.tt0 = torch.arange(t0, 0, dt)
         
         self.count_neg_t = len(self.tt0)
-        print("count_neg_t: ", self.count_neg_t)
+        if self.dbg:
+            print("count_neg_t: ", self.count_neg_t)
 
         self.tt1 = self.get_pos_times()
         self.count_pos_t = len(self.tt1)
-        print("count_pos_t: ", self.count_pos_t)
+        if self.dbg:
+            print("count_pos_t: ", self.count_pos_t)
 
         # self.tt0 = torch.linspace(-1, 0, init_t)
         # self.tt1 = torch.linspace(0, t1, TN)[1:]
@@ -380,6 +389,8 @@ class Model:
         cprogress_succ = None
         cprogress_end = None
 
+        global_self = self
+
         if cprogress is not None:
             assert hasattr(cprogress, "succ")
             assert hasattr(cprogress, "print_end")
@@ -392,7 +403,8 @@ class Model:
             
             def __init__(self):
                 if _progress is None:
-                    print("warning: progress is not set!")
+                    if global_self.dbg:
+                        print("warning: progress is not set!")
             
             @wraps(cprogress_succ)
             def succ(self, step):
@@ -482,7 +494,7 @@ class Model:
 
 class CModel(Model):
 
-    def __init__(self, N, t0=-1, t1=1, dd=(0.01, 0.01), ll=(3, 3),):
+    def __init__(self, N, t0=-1, t1=1, dd=(0.01, 0.01), ll=(3, 3), **kwargs):
         '''
         
         '''
@@ -500,14 +512,15 @@ class CModel(Model):
             self.make_coord_space(ll[0], ll[1], ll[2])
 
         dt = torch.abs(torch.tensor(t0-0))/(N.shape[0])
-        Model.__init__(self, t0, t1, dt)
-        
-        print("tt0:")
-        print(self.tt0[0], self.tt0[-1])
-        print(len(self.tt0))
-        print("tt1:")
-        print(self.tt1[0], self.tt1[-1])
-        print(len(self.tt1))
+        Model.__init__(self, t0, t1, dt, **kwargs)
+
+        if self.dbg:
+            print("tt0:")
+            print(self.tt0[0], self.tt0[-1])
+            print(len(self.tt0))
+            print("tt1:")
+            print(self.tt1[0], self.tt1[-1])
+            print(len(self.tt1))
 
     # TODO: make decorator with classmethod
     def g_init(self, idx, t):
@@ -530,12 +543,17 @@ class CModel(Model):
         # tt0 = torch.arange(self.t0-self.dt, 0, self.dt)
         # tt0 = torch.arange(self.t0-self.dt, 0, 1/(self.N.shape[0]))
 
-    def _model1(self, trace, idx_t, idx_td):
-        omega = self.omega
-        # print("t:", t)
+    def get_params(self):
         a = torch.tensor([1.5, 0.])
         b = torch.tensor([1.5, 0.])
         d = torch.tensor([0.0001, 0.0001])
+        return (a, b, d)
+ 
+    def _model1(self, trace, idx_t, idx_td):
+        omega = self.omega
+        # print("t:", t)
+        a, b, d = self.get_params()
+
         # idx_t = self.get_t(t)
         # idx_td = self.get_t(t-delay)
         # import pdb; pdb.set_trace()
@@ -744,8 +762,9 @@ def test_solver(t0, t1, dt, dd, ll, in_filename, out_filename,
             count_neg_t = model.count_neg_t+3
             # count_neg_t = 10
             # print("count_neg_t:", count_neg_t)
-            with chars.Correlation(tr0.trace, 1) as corr:
-                with chars.Lyapunov(dd[0], dd[0], tr0.trace, 1) as lpv:
+            with chars.Correlation(trace=tr0.trace, step=1) as corr:
+                with chars.Lyapunov(
+                        dd[0], dd[0], trace=tr0.trace, step=1) as lpv:
                     with StackCleanerMessenger(
                             tr0.trace, count_neg_t, stack_size) as stack:
                         print("\nstack_size:")
@@ -756,11 +775,20 @@ def test_solver(t0, t1, dt, dd, ll, in_filename, out_filename,
                         tr0.show_series_size()
                         # stack.show_stack()
                         stack.show_stack_size()
+    print("for Lapunov:")
     print("lpv.results:")
-    print(lpv.results["Lambda"])
+    print('lpv.results["Lambda"][-1].shape')
+    print(lpv.results["Lambda"][-1].shape)
+    print('lpv.results["Lambda"][-1]')
+    print(lpv.results["Lambda"][-1])
+    print('lpv.results["Lambda"][-1][lpv.results["Lambda"][-1]==-np.inf]')
+    print(lpv.results["Lambda"][-1][lpv.results["Lambda"][-1] == -np.inf])
+    # print(lpv.results["Lambda"])
     lpv.plot(all=True)
     print("len(lpv.results)")
     print(len(lpv.results["Lambda"]))
+
+    print("for correlation:")
     corr.plot(all=False)
     # print("len corr.result:")
     # print(corr.results['C'])
@@ -797,7 +825,8 @@ if __name__ == "__main__":
     else:
         print("solving main problem:")
         # test_solver(-1, 10, 0.01, (0.01, 0.01), (3, 3),
-        test_solver(-1, 100, 0.01, (0.01,), (10,),
+        # test_solver(-1, 100, 0.01, (0.01,), (10,),
+        test_solver(-1, 1, 0.01, (0.01,), (10,),
                     in_filename="N.tmp",
                     out_filename="res.tmp", video=False)
 
