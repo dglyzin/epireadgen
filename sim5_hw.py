@@ -719,17 +719,18 @@ def mk_units(units_spec, utypes_name, ucounts_name, ehandler):
             utypes_name, pdist.Uniform(0, len(sample_space)))
         utypes = sample_space[chosen.type(torch.long)]
 
-        # another usage of observe effectful. No event, just context:
-        ehandler.observe(
-            "sample_space_of_"+utypes_name,
-            state_context={"utypes": utypes},
-            dbg=False)
+        if ehandler is not None:
+            # another usage of observe effectful. No event, just context:
+            ehandler.observe(
+                "sample_space_of_"+utypes_name,
+                state_context={"utypes": utypes},
+                dbg=False)
 
-        if len(utypes) == 0:
-            # exit with no father work (by raising `NonlocalExit`)
-            ehandler.trigger("force_exit", {"factor": -500}, True)
-            # should not been here in the `with` context
-            assert False
+            if len(utypes) == 0:
+                # exit with no father work (by raising `NonlocalExit`)
+                ehandler.trigger("force_exit", {"factor": -500}, True)
+                # should not been here in the `with` context
+                assert False
     else:
         utypes = units_spec["types"]
     
@@ -779,13 +780,14 @@ def mk_units(units_spec, utypes_name, ucounts_name, ehandler):
                 ucounts_name, pdist.Uniform(
                     min_count*torch.ones(n), max_count*torch.ones(n)))
 
-        # another usage of observe effectful. No event, just context:
-        ehandler.observe(
-            "counts_of_"+ucounts_name,
-            state_context={"ucounts": ucounts},
-            dbg=False)
+        if ehandler is not None:
+            # another usage of observe effectful. No event, just context:
+            ehandler.observe(
+                "counts_of_"+ucounts_name,
+                state_context={"ucounts": ucounts},
+                dbg=False)
 
-        # print(ucounts)
+            # print(ucounts)
     else:
         ucounts = units_spec["counts"]
     
@@ -833,7 +835,8 @@ def make_U(U, aUnits, bUnits, dbg):
 
 
 def mk_decisions(Ax, Ay, x0, y0, mdbg):
-    '''To sample (Ax_T, Ay_T), if they not given. Will return
+    '''To sample (Ax_T, Ay_T) then transpose them if they not given else just
+    return what been given (i.e. Ax, Ay). Will return
     normalized (Ax, Ay) in that case. (if they is they should be alredy)'''
 
     if Ax is None:
@@ -842,11 +845,12 @@ def mk_decisions(Ax, Ay, x0, y0, mdbg):
         Ax_T = pyro.sample("Ax_T", pdist.Uniform(
             torch.zeros(Ax_T_shape), torch.ones(Ax_T_shape)))
         Ax = Ax_T.T
-        # since mcmc do not used guide and hence simplex constrain:
-        Ax = F.normalize(Ax, p=1, dim=0)
-        if mdbg:
-            print("Ax:")
-            print(Ax)
+    # since mcmc do not used guide and hence simplex constrain:
+    # also used here since this not change Ax if it alredy normalized:
+    Ax = F.normalize(Ax, p=1, dim=0)
+    if mdbg:
+        print("Ax:")
+        print(Ax)
 
     if Ay is None:
         Ay_T_shape = (len(y0), len(x0))  # should be (len(x0), len(y0)) for Ay
@@ -858,11 +862,12 @@ def mk_decisions(Ax, Ay, x0, y0, mdbg):
             torch.zeros(Ay_T_shape), torch.ones(Ay_T_shape)))
         '''
         Ay = Ay_T.T
-        # since mcmc do not used guide and hence simplex constrain:
-        Ay = F.normalize(Ay, p=1, dim=0)
-        if mdbg:
-            print("Ay:")
-            print(Ay)
+    # since mcmc do not used guide and hence simplex constrain:
+    # also used here since this not change Ax if it alredy normalized:
+    Ay = F.normalize(Ay, p=1, dim=0)
+    if mdbg:
+        print("Ay:")
+        print(Ay)
     return (Ax, Ay)
 
 
@@ -878,15 +883,25 @@ def run_model(x0, y0, Ua, Ub, T, dt, Ax=None, Ay=None, ehandler=None,
     y = y0.detach().clone()
     for t in range(T):
         
-        x -= dt*torch.matmul(torch.mul(Ub, Ay), y_prev)
-        x[x < 0] = 0.
-        x[x > x0] = x0[x > x0][:]
+        x = x_prev - dt*torch.matmul(torch.mul(Ub, Ay), y_prev)
+        # x = torch.where(x < 0, 0.001*torch.ones_like(x), x)
+        x = torch.masked_fill(x, x < 0, 0.)
+        # x[x < 0] = 0.
+        # x = torch.clamp(x, min=0, max=max(x0))
+        # this should not happend if x,y>0 and Ax, Ay
+        # have been normalized properly:
+        # x = torch.where(x > x0, x0, x)
+        # x[x > x0] = x0[x > x0][:]
         if mdbg:
             print("x:", x)
-
-        y -= dt*torch.matmul(torch.mul(Ua, Ax), x_prev)
-        y[y < 0] = 0.
-        y[y > y0] = y0[y > y0][:]
+        
+        y = y_prev - dt*torch.matmul(torch.mul(Ua, Ax), x_prev)
+        # y = torch.where(y < 0, 0.001*torch.ones_like(y), y)
+        y = torch.masked_fill(y, y < 0, 0.)
+        # y[y < 0] = 0.
+        # y = torch.clamp(y, min=0, max=max(y0))
+        # y = torch.where(y > y0, y0, y)
+        # y[y > y0] = y0[y > y0][:]
 
         # only now We can do that
         x_prev = x

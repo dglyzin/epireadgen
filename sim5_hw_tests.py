@@ -50,12 +50,13 @@ def mk_spec(U, A_spec, B_spec):
     sim_spec = {
         "agents": {"A": A_spec, "B": B_spec},
 
-        "T": 70,
+        "T": 30,
         # than smaller it became than less influence of
         # who will attack first:
         "dt": 0.5,
         # "dt": 0.5,
-        "init_factor": -110.0,
+        "init_factor": 0.0,
+        # "init_factor": -110.0,
 
         "U": U,
 
@@ -76,10 +77,12 @@ def mk_spec(U, A_spec, B_spec):
                 "exit": True
             },
             {
+                # it is actualy some kind of learning rate:
                 "test": lambda goalA, goalB: not goalA and not goalB,
                 # only once from all times will factor been used  
                 "once": True,
-                "factor": 10,
+                "factor": -100,
+                # "factor": 10,
                 "exit": False
             }
         ] 
@@ -89,14 +92,7 @@ def mk_spec(U, A_spec, B_spec):
 # ######################### tests #########################:
 
 
-def test0():
-    '''
-    U: 1>2; 1=1>2=2
-    goals:
-    A: B.2=0
-    B: B.2!=0
-    find decision_matrix
-    '''
+def mk_spec_for_test0():
     # efficiency matrix:
     # (will be transposed)
     U = 0.1*torch.ones((2, 2))
@@ -136,12 +132,25 @@ def test0():
             "types": [0, 1],
             "counts": torch.tensor([5, 5]).type(torch.float)
         },
-        "goal": lambda x, y: x[0] <= 0
+        "goal": lambda x, y: y[1] > 0
+        # "goal": lambda x, y: x[0] <= 0
         # "goal": lambda x, y: (x <= 0).all()
         # "goal": lambda x, y: x[1] <= 0 and x[-1] <= 0,  # and y[2] >= 2
     }
 
     sim_spec = mk_spec(U, A_spec, B_spec)
+    return sim_spec
+
+
+def test0():
+    '''
+    U: 1>2; 1=1>2=2
+    goals:
+    A: B.2=0
+    B: B.2!=0
+    find decision_matrix
+    '''
+    sim_spec = mk_spec_for_test0()
     run_test_and_show(sim_spec, mdbg=True)
 
     mcmc, losses = sm.test_mcmc(20, sim_spec, mdbg=False, edbg=False)
@@ -150,14 +159,7 @@ def test0():
     factors = run_tests_and_collect_factors(30, sim_spec)
 
 
-def test1():
-    '''
-    U: 1>2; 1=1>2=2
-    goals:
-    A: B.2=0
-    B: B.2!=0
-    find decision_matrix and x0
-    '''
+def mk_spec_for_test1():
     # efficiency matrix:
     # (will be transposed)
     U = 0.1*torch.ones((2, 2))
@@ -206,6 +208,18 @@ def test1():
     }
 
     sim_spec = mk_spec(U, A_spec, B_spec)
+    return sim_spec
+
+
+def test1():
+    '''
+    U: 1>2; 1=1>2=2
+    goals:
+    A: B.2=0
+    B: B.2!=0
+    find decision_matrix and x0
+    '''
+    sim_spec = mk_spec_for_test1()
     run_test_and_show(sim_spec, mdbg=True)
 
     mcmc, losses = sm.test_mcmc(90, sim_spec, mdbg=False, edbg=False)
