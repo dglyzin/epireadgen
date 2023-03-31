@@ -3,6 +3,8 @@ import sim5_hw as sm
 import torch
 import matplotlib.pyplot as plt
 
+import numpy as np
+
 
 def run_test_and_show(sim_spec, mdbg=False, edbg=False):
     '''Run the model with given spec.'''
@@ -55,8 +57,8 @@ def mk_spec(U, A_spec, B_spec):
         # who will attack first:
         "dt": 0.5,
         # "dt": 0.5,
-        "init_factor": 0.0,
-        # "init_factor": -110.0,
+        # "init_factor": 0.0,
+        "init_factor": -110.0,
 
         "U": U,
 
@@ -72,9 +74,9 @@ def mk_spec(U, A_spec, B_spec):
             {
                 "test": lambda goalA, goalB: not goalA and goalB,
                 "once": False,
-                "factor": -1000,
+                "factor": -np.inf,  # -1000,
                 # will be exited once happend, factor been be overriden
-                "exit": True
+                "exit": False
             },
             {
                 # it is actualy some kind of learning rate:
@@ -133,6 +135,7 @@ def mk_spec_for_test0():
             "counts": torch.tensor([5, 5]).type(torch.float)
         },
         "goal": lambda x, y: y[1] > 0
+        # "goal": lambda x, y: False
         # "goal": lambda x, y: x[0] <= 0
         # "goal": lambda x, y: (x <= 0).all()
         # "goal": lambda x, y: x[1] <= 0 and x[-1] <= 0,  # and y[2] >= 2
@@ -153,10 +156,11 @@ def test0():
     sim_spec = mk_spec_for_test0()
     run_test_and_show(sim_spec, mdbg=True)
 
-    mcmc, losses = sm.test_mcmc(20, sim_spec, mdbg=False, edbg=False)
+    mcmc, losses = sm.run_mcmc(1200, sim_spec, mdbg=False, edbg=False)
     sim_spec = sm.update_spec(sim_spec, mcmc, idx=-1, side="A", dbg=False)
     print("\nsolution:", sim_spec['agents']['A'])
     factors = run_tests_and_collect_factors(30, sim_spec)
+    run_test_and_show(sim_spec)
 
 
 def mk_spec_for_test1():
@@ -222,13 +226,13 @@ def test1():
     sim_spec = mk_spec_for_test1()
     run_test_and_show(sim_spec, mdbg=True)
 
-    mcmc, losses = sm.test_mcmc(90, sim_spec, mdbg=False, edbg=False)
+    mcmc, losses = sm.run_mcmc(90, sim_spec, mdbg=False, edbg=False)
     sim_spec = sm.update_spec(sim_spec, mcmc, idx=-1, side="A", dbg=False)
     print("\nsolution:", sim_spec['agents']['A'])
     factors = run_tests_and_collect_factors(30, sim_spec)
 
 
-
 if __name__ == "__main__":
-    test1()
+    test0()
+    # test1()
     

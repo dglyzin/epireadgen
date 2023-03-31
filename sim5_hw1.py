@@ -15,27 +15,115 @@ import progresses.progress_cmd as progress_cmd
 ProgressCmd = progress_cmd.ProgressCmd
 
 
-def model_init(sim_spec):
-    y01 = sim_spec["agents"]["B"]["units"]["counts"][1]
-    dA = dist.Uniform(torch.zeros(2, 2), torch.ones(2, 2))
-    dB = dist.Uniform(torch.zeros(2, 2), torch.ones(2, 2))
-    return (y01, dA, dB)
+class Seddle():
+    '''Simple test for verifying the algorithms is working properly.'''
+
+    def __init__(self, a, b, dbg=False):
+        self.a = a
+        self.b = b
+        self.dbg = dbg
+        
+    def init_params_dist(self):
+        self.depsilon = dist.Normal(0.01, 0.001)
+    
+        self.dA = dist.Uniform(0, 2*self.a)
+        self.dB = dist.Uniform(0, 2*self.b)
+        
+    def gen_params(self):
+        Ax = self.gen_param(self.dA)
+        Ay = self.gen_param(self.dB)
+        return (Ax, Ay)
+
+    def gen_param(self, pdist):
+        # initial guess:
+        Ax = pdist.sample()
+        return(Ax)
+    
+    def calc_lossA(self, loss):
+        return loss
+    
+    def calc_lossB(self, loss):
+        lossB = - loss
+        # lossB = - loss + self.depsilon.sample()
+        return lossB
+    
+    def run_model(self, Ax, Ay):
+        loss = torch.pow((Ax-self.a), 2)/2. - torch.pow((Ay-self.b), 2)/2.
+        return (loss, )
 
 
-def model_init_param(dA):
-    # initial guess:
-    Ax = dA.sample()
-    Ax = F.normalize(Ax, p=1, dim=0)
-    # Ax = 0.5*torch.ones((2, 2))
-    print("init Ax:", Ax)
-    return(Ax)
+class HwModel():
+        
+    def __init__(self, sim_spec, dbg=False):
+
+        # these will be given in optimization:
+        sim_spec["agents"]["A"]["decision_matrix"] = None
+        sim_spec["agents"]["B"]["decision_matrix"] = None
+
+        self.sim_spec = sim_spec
+        self.dbg = dbg
+
+    def init_params_dist(self):
+        
+        self.depsilon = dist.Normal(0.01, 0.001)
+        self.dA = dist.Uniform(torch.zeros(2, 2), torch.ones(2, 2))
+        self.dB = dist.Uniform(torch.zeros(2, 2), torch.ones(2, 2))
+        
+    def gen_params(self):
+        Ax = self.gen_param(self.dA)
+        if self.dbg:
+            print("init Ax:", Ax)
+        Ay = self.gen_param(self.dB)
+        # Ay = 0.1*torch.ones((2, 2))
+        # Ay[0, 0] = 0.9
+        # Ay[0, 1] = 0.9
+
+        if self.dbg:
+            print("init Ax:", Ax)
+        return (Ax, Ay)
+
+    def gen_param(self, pdist):
+        # initial guess:
+        Ax = pdist.sample()
+        Ax = F.normalize(Ax, p=1, dim=0)
+        # Ax = 0.5*torch.ones((2, 2))
+        
+        return(Ax)
+
+    def calc_lossA(self, loss):
+        lossA = loss
+        # lossA = loss + self.depsilon.sample()  # - 0.001
+        return lossA
+
+    def calc_lossB(self, loss):
+        # see model lost section
+        y01 = self.sim_spec["agents"]["B"]["units"]["counts"][1]
+        lossB = torch.pow(y01, 3) - loss
+        # lossB = lossB - depsilonB.sample()  # - 0.001
+        return lossB
+
+    def run_model(self, Ax, Ay):
+        self.sim_spec["agents"]["A"]["decision_matrix"] = Ax
+        self.sim_spec["agents"]["B"]["decision_matrix"] = Ay
+
+        # opt_mode=False since we do not need Ax.requires_grad_ inside:
+        loss, Ax, Ay, x, y = model(self.sim_spec, opt_mode=False, mdbg=False)
+        return (loss, Ax, Ay, x, y)
 
 
-def run_model(sim_spec, Ax, Ay):
-    sim_spec["agents"]["A"]["decision_matrix"] = Ax
-    sim_spec["agents"]["B"]["decision_matrix"] = Ay
-    loss, _, x, y = model(sim_spec, opt_mode=False, mdbg=False)
-    return (loss, x, y)
+class HwModel1(HwModel):
+
+    def gen_params(self):
+        Ax = torch.tensor([[0.1449, 0.9720],
+                           [0.8551, 0.0280]])
+        Ay = torch.tensor([[0.3485, 0.4437],
+                           [0.6515, 0.5563]])
+
+        print("init Ax:", Ax)
+        print("init Ay:", Ay)
+
+        return (Ax, Ay)
+    
 
 def guide(model_spec, mdbg=True):
     aSpec = model_spec["agents"]["A"]
@@ -88,7 +176,7 @@ def model(model_spec, opt_mode=False, mdbg=True):
     loss = torch.pow(y[1], 3)
     # pyro.factor("err", factor) 
     
-    return (loss, Ax, x, y)
+    return (loss, Ax, Ay, x, y)
     # return factor
     
 
@@ -122,37 +210,27 @@ def optimize(steps, model, sim_spec):
     return(losses, Ax, x, y)
 
 
-def optimize_maxmin(stepsA, stepsB, lrA, lrB,  model, sim_spec):
-    '''$max_{Ax}min_{Ay} R(Ax, Ay)$'''
+def optimize_maxmin(stepsA, stepsB, lrA, lrB, model,
+                    switchB_used=True, dbg=True):
+    '''$max_{Ax}min_{Ay} R(Ax, Ay)$
+
+    - ``switchB_used`` -- adding randomness to B side controled
+    param Ay in order to spread up searching space (support of the model 
+    execution space).
+    '''
     # lrA = 0.01
     # lrB = 0.01
 
-    # see model lost sect
-    y01 = sim_spec["agents"]["B"]["units"]["counts"][1]
+    model.init_params_dist()
 
     # initial guess:
-    dA = dist.Uniform(torch.zeros(2, 2), torch.ones(2, 2))
-    Ax = dA.sample()
-    Ax = F.normalize(Ax, p=1, dim=0)
-    # Ax = 0.5*torch.ones((2, 2))
-    print("init Ax:", Ax)
-
+    Ax, Ay = model.gen_params()
     Ax.requires_grad_()
     optA = optim.SGD([Ax], lr=lrA, momentum=0.9)
-
-    dB = dist.Uniform(torch.zeros(2, 2), torch.ones(2, 2))
-    Ay = dB.sample()
-    Ay = F.normalize(Ay, p=1, dim=0)
-    # Ay = 0.1*torch.ones((2, 2))
-    # Ay[0, 0] = 0.9
-    # Ay[0, 1] = 0.9
-    print("init Ay:", Ay)
 
     Ay.requires_grad_()
     optB = optim.SGD([Ay], lr=lrB, momentum=0.9)
 
-    depsilon = dist.Normal(0.01, 0.001)
-    depsilonA = dist.Normal(0.5, 0.1)
     opt_progress = ProgressCmd(stepsA, prefix="opt progress:")
     lossesA = []
     lossesB = []
@@ -161,22 +239,19 @@ def optimize_maxmin(stepsA, stepsB, lrA, lrB,  model, sim_spec):
         
         # min_{Ay} step (note detach() usage here):
         for step1 in range(stepsB):
-            switchB = dist.Bernoulli(step1/stepsB).sample().type(torch.long)
-            # Ax_for_B = dB.sample() if switchB else Ax.detach()
-            if switchB:
-                Ay = dB.sample()
-                Ay = F.normalize(Ay, p=1, dim=0)
-                Ay.requires_grad_()
-                optB = optim.SGD([Ay], lr=lrB, momentum=0.9)
+            if switchB_used:
+                switchB = dist.Bernoulli(step1/stepsB).sample().type(torch.long)
+                # Ax_for_B = dB.sample() if switchB else Ax.detach()
+                if switchB:
+                    Ay = model.gen_param(model.dB)
+                    Ay.requires_grad_()
+                    optB = optim.SGD([Ay], lr=lrB, momentum=0.9)
 
-            Ax_for_B = Ax.detach()
-            sim_spec["agents"]["A"]["decision_matrix"] = Ax_for_B
-            sim_spec["agents"]["B"]["decision_matrix"] = Ay
-            # opt_mode=False since we do not need Ax.requires_grad_ inside:
-            lossB, _, x, y = model(sim_spec, opt_mode=False, mdbg=False)
-            lossB = torch.pow(y01, 3) - lossB
-            # lossB = lossB - depsilonB.sample()  # - 0.001
-            print("lossB:", lossB)
+            lossB, *_ = model.run_model(Ax.detach(), Ay)
+            # do the x, y realy needed?
+            lossB = model.calc_lossB(lossB)
+            if dbg:
+                print("lossB:", lossB)
             lossB.backward()
             # print("Ay.grad:", Ay.grad)
             optB.step()
@@ -185,44 +260,72 @@ def optimize_maxmin(stepsA, stepsB, lrA, lrB,  model, sim_spec):
             lossesB.append(lossB.detach().clone())
 
         # max_{Ax} step:
-        sim_spec["agents"]["A"]["decision_matrix"] = Ax
-        sim_spec["agents"]["B"]["decision_matrix"] = Ay.detach()
-        lossA, _, x, y = model(sim_spec, opt_mode=False, mdbg=False)
+        lossA, *_ = model.run_model(Ax, Ay.detach())
+        # do the x, y realy needed?
+        lossA = model.calc_lossA(lossA)
         # print("\nlossA:", lossA)
-        lossA = lossA + depsilon.sample()  # - 0.001
+
         lossA.backward()
         optA.step()
         optA.zero_grad()
 
         lossesA.append(lossA.detach().clone())
     opt_progress.print_end()
-    return(lossesA, lossesB, Ax, Ay, x, y)
+    return(lossesA, lossesB, Ax, Ay)
 
 
-def test3(stepsA, stepsB, lrA, lrB, steps_test, dbg=True):
+def test_maxmin_seddle(
+        stepsA, stepsB, lrA, lrB,
+        switchB_used=False, dbg=True):
+    model = Seddle(0.3, 0.7, dbg=dbg)
+    lossesA, lossesB, Ax, Ay = optimize_maxmin(
+        stepsA, stepsB, lrA, lrB, model,
+        switchB_used=switchB_used, dbg=dbg)
+    
+    # if dbg:
+    print("optimization results:")
+    print("lossesA[-1]:", lossesA[-1])
+    print("lossesB[-1]:", lossesB[-1])
+    print("Ax:", Ax)
+    print("Ay:", Ay)
+    # print("x:", x)
+    # print("y:", y)
+
+    plt.plot(lossesA)
+    plt.show()
+    plt.plot(lossesB)
+    # plt.ylim([-1, 126])
+    plt.show()
+
+    
+def test_maxmin_hw(
+        stepsA, stepsB, lrA, lrB, steps_test,
+        switchB_used=True, dbg=True):
     '''testing $max_{Ax}min_{Ay} R(Ax, Ay)$
-    optimization.'''
+    optimization.
+    '''
 
     sim_spec = smt.mk_spec_for_test0()
 
-    # these will be given in optimization:
-    sim_spec["agents"]["A"]["decision_matrix"] = None
-    sim_spec["agents"]["B"]["decision_matrix"] = None
-    
-    lossesA, lossesB, Ax, Ay, x, y = optimize_maxmin(
-        stepsA, stepsB, lrA, lrB, model, sim_spec)
+    model = HwModel1(sim_spec, dbg=dbg)
+    # model = HwModel(sim_spec, dbg=dbg)
+
+    lossesA, lossesB, Ax, Ay = optimize_maxmin(
+        stepsA, stepsB, lrA, lrB, model,
+        switchB_used=switchB_used, dbg=dbg)
 
     Ax = F.normalize(Ax, p=1, dim=0)
     Ay = F.normalize(Ay, p=1, dim=0)
 
-    if dbg:
-        print("optimization results:")
-        print("lossesA[-1]:", lossesA[-1])
-        print("lossesB[-1]:", lossesB[-1])
-        print("Ax:", Ax)
-        print("Ay:", Ay)
-        print("x:", x)
-        print("y:", y)
+    loss, _, _, x, y = model.run_model(Ax, Ay)
+    # if dbg:
+    print("optimization results:")
+    print("lossesA[-1]:", lossesA[-1])
+    print("lossesB[-1]:", lossesB[-1])
+    print("Ax:", Ax)
+    print("Ay:", Ay)
+    print("x:", x)
+    print("y:", y)
     plt.plot(lossesA)
     plt.show()
     plt.plot(lossesB)
@@ -236,10 +339,10 @@ def test3(stepsA, stepsB, lrA, lrB, steps_test, dbg=True):
     loss_max = 0
     for step in range(steps_test):
         test_progress.succ(step)
-        sim_spec["agents"]["B"]["decision_matrix"] = None
-        loss, Ax, x, y = model(sim_spec, opt_mode=True, mdbg=False)
+        loss, Ax, Ay, x, y = model.run_model(Ax, None)
         if loss > loss_max:
             Ax_max = Ax
+            Ay_max = Ay
             x_max = x
             y_max = y
             loss_max = loss
@@ -248,15 +351,16 @@ def test3(stepsA, stepsB, lrA, lrB, steps_test, dbg=True):
         # losses.append(torch.sign(loss).detach().numpy())
     test_progress.print_end()
 
-    if dbg:
-        print("test results:")
-        print("loss_max:", loss_max)
-        
-        print("Ax_max:", Ax_max)
-        print("x_max:", x_max)
-        print("y_max:", y_max)
-        print("losses<=0/losses:",
-              len(list(filter(lambda x: x <= 0.02, losses)))/len(losses))
+    # if dbg:
+    print("test results:")
+    print("loss_max:", loss_max)
+
+    print("Ax_max:", Ax_max)
+    print("Ay_max:", Ay_max)
+    print("x_max:", x_max)
+    print("y_max:", y_max)
+    print("losses<=0/losses:",
+          len(list(filter(lambda x: x <= 0.02, losses)))/len(losses))
     plt.plot(losses)
     # plt.hist(losses)
     plt.show()
@@ -324,8 +428,21 @@ def test0(dbg=True):
 
 if __name__ == "__main__":
 
-    test3(20, 40, 0.001, 0.001, 130)
-    # test3(300, 10, 0.001, 0.001, 130)
+    # this is working correctly:
+    # test_maxmin_seddle(700, 1, 0.001, 0.001, switchB_used=True, dbg=False)
+
+    # this is working correctly:
+    # test_maxmin_seddle(700, 1, 0.001, 0.001, switchB_used=False, dbg=False)
+
+    # this is most promising test for hw_model from all below:
+    # (note: it seems that pytorch maxmin implementation only work if there is
+    #  some randomness):
+    # (note: increasing stepsA father will give no beter result)
+    test_maxmin_hw(170, 10, 0.001, 0.001, 130, switchB_used=True, dbg=True)
+
+    # test_maxmin_hw(400, 3, 0.0001, 0.0001, 130, switchB_used=True, dbg=True)
+    # test_maxmin_hw(20, 40, 0.001, 0.001, 130)
+    # test_maxmin_hw(300, 10, 0.001, 0.001, 130)
     # test2(300)
     # test1(700)
     # test0()

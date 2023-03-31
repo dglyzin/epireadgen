@@ -398,7 +398,10 @@ def mk_ehandler(init_factor, goalAtest, goalBtest, scores):
 
     @ehandler.eregister("goalAoverB")
     def goalAoverB(econtext, msg, trace):
-        '''Solver choose side A'''
+        '''Solver choose side A.
+        If score["exit"] is True reinit econtext["factor"]
+        by score["factor"] else, try to update by it.
+        If score["once"], ignore it once happend.'''
         
         # oname = msg["name"]
         events_to_check = econtext["events_to_check"]
@@ -813,7 +816,7 @@ def make_U(U, aUnits, bUnits, dbg):
 
     # U set by U[k][:] like k against [:] (all)
     # but we need it to pairwise mult with
-    # A[:][k] decis. matrix for each k (how many of k attack [:] (all))
+    # A[:][k] decis. matrix for each k (how many of k attacking [:] (all))
     # so We use U1.T here:
     Ua = Ua.T
     Ub = Ub.T
@@ -980,11 +983,52 @@ def test_ehandler(dbg=True):
 def test_inference(T, dt=0.01, mdbg=True, edbg=True):
     pyro.clear_param_store()
     init_factor = -110.0
-    ehandler = mk_ehandler(init_factor)
-    print("make_U([0, 1, 4], [2, 3]):")
-    U1 = make_U([0, 1, 4], [2, 3])
-    print(U1)
+    a_goal = lambda x, y: y[1] <= 0
+    b_goal = lambda x, y: y[1] > 0
+    scores = [
+        {
+            "test": lambda goalA, goalB: goalA and not goalB,
+            "once": False,
+            "factor": 0,
+            # will be exited once happend, factor been be overriden
+            "exit": True
+        }]
+    ehandler = mk_ehandler(init_factor, a_goal, b_goal, scores)
 
+    '''
+    U = 0.1*torch.ones((8, 8))
+    U[0][:3] = torch.tensor([0.7, 0.8, 0.3])
+    U[1][2:] = torch.tensor([0.3, 0.5, 0.9, 0.9, 0.9, 0.2])
+    U[2][:4] = torch.tensor([0.9, 0.9, 0.5, 0.2])
+    U[3][2:-1] = torch.tensor([0.9, 0.5, 0.7, 0.7, 0.7])
+    U[4][:] = torch.tensor([0.6, 0.7, 0.9, 0.9, 0.5, 0.5, 0.5, 0.2])
+    U[5][:] = torch.tensor([0.9, 0.9, 0.6, 0.4, 0.1, 0.1, 0.1, 0.1])
+    U[6][4:] = torch.tensor([0.9, 0.9, 0.9, 0.5])
+    U[7][4:] = torch.tensor([0.9, 0.9, 0.9, 0.7])
+    '''
+    U = 0.1*torch.ones((2, 2))
+    # first effective against second:
+    # U[0][1] = 0.9  # 0.7
+
+    # second effective against first:
+    # U[1][0] = 0.9
+
+    U[0][:] = 0.5
+
+    Ua, Ub = make_U(U, [0, 1], [0, 1], False)
+    print("Ua, Ub:")
+    print((Ua, Ub))
+    # print("make_U([0, 1, 4], [2, 3]):")
+    # U1 = make_U([0, 1, 4], [2, 3])
+    # print(U1)
+
+    x0 = torch.tensor([5, 5]).type(torch.float)
+    y0 = torch.tensor([5, 5]).type(torch.float)
+
+    Ax = torch.tensor([[0.0048, 0.5148],
+                       [0.9952, 0.4852]])
+    # Ax = torch.tensor([[0., 0.], [1., 1.]])
+    Ay = torch.tensor([[0.7235, 0.7948], [0.2765, 0.2052]])
     '''
     print("FOR testing without the context:")
     # no exception ounside the context (exception raise in cont() methed!)
@@ -995,15 +1039,16 @@ def test_inference(T, dt=0.01, mdbg=True, edbg=True):
     '''
     print("FOR testing with the context:")
     pyro.clear_param_store()
-    ehandler = mk_ehandler(init_factor)
+    ehandler = mk_ehandler(init_factor, a_goal, b_goal, scores)
     with ehandler:
+                
         # U set by U[k][:] like k against [:]
         # but we need it to pairwise mult with
         # A[:][k] decis. matrix for each k (how many of k attack [:])
         # so We use U1.T here:
-        model(torch.tensor([3, 3, 0, 0, 4]).type(torch.float),
-              torch.tensor([0, 1, 4,  4, 0]).type(torch.float), U1.T, T, dt,
-              ehandler=ehandler, mdbg=mdbg, edbg=edbg)
+        run_model(x0, y0, Ua, Ub, T, dt, Ax=Ax, Ay=Ay,
+                  ehandler=ehandler, mdbg=mdbg, edbg=edbg)
+
     onames, observations = ehandler.get("observation")
     print("last observation name:", onames[-1])
     # print("last_observation msg:", observations[-1])
@@ -1017,7 +1062,7 @@ def test_inference(T, dt=0.01, mdbg=True, edbg=True):
     print("END FOR testing with the context")
 
 
-def test_mcmc(steps, sim_spec, mdbg=False, edbg=False):
+def run_mcmc(steps, sim_spec, mdbg=False, edbg=False):
 
     pyro.clear_param_store()
     
@@ -1042,8 +1087,7 @@ def test_mcmc(steps, sim_spec, mdbg=False, edbg=False):
     return(mcmc, losses)
 
 
-if __name__ == "__main__":
-    
+def test_mcmc():
     # efficiency matrix:
     # (will be transposed)
     U = 0.1*torch.ones((8, 8))
@@ -1123,7 +1167,7 @@ if __name__ == "__main__":
     }
     
     # FOR testing mcmc:
-    mcmc, losses = test_mcmc(10, sim_spec, mdbg=False, edbg=False)
+    mcmc, losses = run_mcmc(10, sim_spec, mdbg=False, edbg=False)
     losses_len = len(losses)
     if losses_len > 0:
         losses = torch.cat([
@@ -1204,7 +1248,12 @@ if __name__ == "__main__":
     plt.show()
     print("\nEND FOR factors hist")
     # END FOR
+   
+ 
+if __name__ == "__main__":
     
+    # test_mcmc()
+
     # no need for that: get_samples just return what
     # already been done
     # ehandler1 = mk_ehandler()
@@ -1216,6 +1265,7 @@ if __name__ == "__main__":
     # print(mcmc.get_samples()["Ax_T"].shape)
     # print("scores:")
     # print(scores)
+    test_inference(30, 0.5, mdbg=True, edbg=False)
     # test_inference(10, 0.5, mdbg=True, edbg=False)
     
     
