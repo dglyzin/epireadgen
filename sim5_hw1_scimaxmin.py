@@ -86,7 +86,7 @@ def optimize_maxmin(steps, model_runner, get_optA, get_optB,
         lossesB.append(errB)
 
     progress.print_end()
-
+    # TODO: maybe Ax, Ay should also been collected:
     model_runner.finalize(lossesA, lossesB, Ax, Ay)
 
 

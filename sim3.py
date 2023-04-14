@@ -1,7 +1,11 @@
 import numpy as np
 import pyro
 import pyro.distributions as pdist
+from pyro.infer import SVI, Trace_ELBO, TraceEnum_ELBO
+from pyro.poutine.runtime import _PYRO_PARAM_STORE
+
 import torch
+from torch.distributions import constraints
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -46,6 +50,7 @@ def model1():
 
 
 def m1_fcond(trace):
+    # this means a>=0.7:
     return(trace.nodes['p']['value'] >= 0.7)
 
 
@@ -134,17 +139,52 @@ def m3_fcond2(trace):
 # END FOR
 
 
-def model4():
+def model4(y_obs=torch.tensor(0.2)):
+    '''
+    Accurate solution:
+    $p(x|y=obs) = Normal(\mu_{x|y}, \sigma_{x|y})}$
+    where
+    $\mu_{x|y} = \frac{\sigma^{2}_{x}y_{obs}+\sigma^{2}_{y}\mu_{x}}{\sigma^{2}_{x}+\sigma^{2}_{y}}$
+    $\sigma_{x|y} = \frac{\sigma_{x}\sigma_{y}}{\sqrt(\sigma^{2}_{x}+\sigma^{2}_{y})}$
+
+    for p(x|y=0.2) get: $\mu_{x|y}=0.19801980198019803$
+    for p(x|y=-0.2) get: $\mu_{x|y}=-0.19801980198019803$
+    
+    Tests:
+    sigma = (sigma_x*sigma_y)/np.sqrt(sigma_x**2+sigma_y**2)
+
+    In [10]: mu_x, sigma_x, sigma_y = [0, 1, 0.1]
+
+    In [11]: mu = lambda y:(sigma_x**2*y+sigma_y**2*mu_x)/(sigma_x**2+sigma_y*
+        ...: *2)
+
+    In [12]: sigma = (sigma_x*sigma_y)/np.sqrt(sigma_x**2+sigma_y**2)
+
+    In [13]: mu(0.2)
+    Out[13]: 0.19801980198019803
+
+    In [14]: mu(-0.2)
+    Out[14]: -0.19801980198019803
+
+    In [15]: sigma
+    Out[15]: 0.09950371902099893
+    '''
     x = pyro.sample("x", pdist.Normal(0, 1))
     
     # if obs = 0.2, p(x|y) will be around 0.2
     # if obs = -0.2, p(x|y) will be around -0.2
     # (if threshold==0.4):
-    y = pyro.sample("y", pdist.Normal(x, 0.1), obs=torch.tensor(-0.2))
+    y = pyro.sample("y", pdist.Normal(x, 0.1), obs=y_obs)
 
 
 def m4_fcond0(trace):
     return(True)
+
+
+def guide_model4(y_obs=torch.tensor(0.2)):
+    alpha = pyro.param(
+        "a", torch.tensor(0.5), constraint=constraints.interval(-1., 1.))
+    pyro.sample("x", pdist.Normal(alpha, 0.03))
 
 
 class Cond(pyro.poutine.trace_messenger.TraceMessenger):
@@ -166,6 +206,25 @@ class Cond(pyro.poutine.trace_messenger.TraceMessenger):
 '''
 def rejection_sampling(model, model_kwargs, fcondition,
                        N=3, cprogress=ProgressCmd):
+    ''
+    This scheme will not work without pyro.stack/pyro.sample calls
+    since: 
+    with sim3.Cond(lambda trace: True) as t1:
+    ...:     sim3.Cond(lambda trace: True)(lambda x: x+1).get_trace(3)
+    ...:     print(t1.trace.nodes)
+    will return
+    OrderedDict()
+
+    but if changed to:
+    with sim3.Cond(lambda trace: True) as t1:
+    ...:     t2 = sim3.Cond(lambda trace: True)
+    ...:     t2(lambda x: x+1).get_trace(3)
+    ...:     print(t1.trace.nodes)
+    ...:     print(t2.trace.nodes)
+    then it will work ():
+    OrderedDict()
+    OrderedDict([('_INPUT', {'name': '_INPUT', 'type': 'args', 'args': (3,), 'kwargs': {}}), ('_RETURN', {'name': '_RETURN', 'type': 'return', 'value': 4}), ('cond', {'name': 'cond', 'value': True, 'f': <function <lambda> at 0x7fa29cafb840>})])
+    ''
     progress = cprogress(N)
     samples = []
     for step in range(N):
@@ -179,35 +238,6 @@ def rejection_sampling(model, model_kwargs, fcondition,
 '''
 
 
-def rejection_sampling1(model, model_kwargs, fcondition,
-                        N=3, cprogress=ProgressCmd, threshold=0,
-                        use_score=False):
-    '''rejection_sampling with use of score
-    for observing continues (like Normal == 0.1 or Uniform == 0.1)
-    
-    threshold == 0 is equal to p(cond)>Uniform[0, 1]
-    (p(cond) > exp(threshold)*Uniform[0, 1])
-    '''
-    
-    udist = pdist.Uniform(0, 1)
-    
-    progress = cprogress(N)
-    samples = []
-    for step in range(N):
-        with Cond(fcondition) as cstorage:
-            Cond(fcondition)(model).get_trace(**model_kwargs)
-        if cstorage.trace.nodes['cond']['value']:
-            if use_score:
-                score = observe(cstorage.trace)
-                if score >= threshold + udist.log_prob(udist.sample()):
-                    samples.append(cstorage.trace.copy())
-            else:
-                samples.append(cstorage.trace.copy())
-        progress.succ(step)
-    progress.print_end()
-    return(samples)
-
-
 def observe(trace):
     score = 0
     for var in trace.nodes:
@@ -217,6 +247,43 @@ def observe(trace):
             score += fn.log_prob(val)
     return(score)
 
+
+# TODO: use count of succ as steps, rather then given N
+# REF: http://v1.probmods.org/inference-process.html#the-performance-characteristics-of-different-algorithms
+def rejection_sampling1(model, model_kwargs, fcondition,
+                        N=3, cprogress=ProgressCmd, threshold=0,
+                        use_score=False, observer=observe):
+    '''rejection_sampling with use of score
+    for observing continues (like Normal == 0.1 or Uniform == 0.1)
+    
+    threshold == 0 is equal to p(cond)>Uniform[0, 1]
+    (p(cond) > exp(threshold)*Uniform[0, 1])
+    '''
+    
+    udist = pdist.Uniform(0, 1)
+    
+    if cprogress is not None:
+        progress = cprogress(N)
+ 
+    samples = []
+    for step in range(N):
+        with Cond(fcondition) as cstorage:
+            Cond(fcondition)(model).get_trace(**model_kwargs)
+        if cstorage.trace.nodes['cond']['value']:
+            if use_score:
+                score = observer(cstorage.trace)
+                # if score >= threshold + udist.log_prob(udist.sample()):
+                if score >= threshold + torch.log(udist.sample()):
+                    samples.append(cstorage.trace.copy())
+            else:
+                samples.append(cstorage.trace.copy())
+        if cprogress is not None:
+            progress.succ(step)
+
+    if cprogress is not None:
+        progress.print_end()
+
+    return(samples)
 
 
 def make_dataFrame(samples, cprogress=ProgressCmd):
@@ -340,16 +407,75 @@ def plot_hist(var, vars):
     
 
 def test_rejection_sampler1_m4(model=model4, condition=m4_fcond0,
+                               y_obs=torch.tensor(0.2),
                                N=3, threshold=0):
-    samples = rejection_sampling1(model, {}, condition,
+    samples = rejection_sampling1(model, {"y_obs": y_obs}, condition,
                                   N=N, threshold=threshold, use_score=True)
-    print(len(samples))
+    print("len(samples):", len(samples))
     plot_results1(samples)
 
 
-if __name__ == "__main__":
+def test_elbo_m4(steps, y_obs):
+    '''
+    for testing rej.sampler with m4
+    this work correctly:
 
-    # test_rejection_sampler1_m4(N=30000, threshold=0.4)
+    Tests:
+    # test_elbo_m4(30, torch.tensor(-0.2))
+    # res a: -0.1989
+    # accurate: -0.19801980198019803
+
+    # test_elbo_m4(30, torch.tensor(0.2))
+    # res a: 0.2050
+    # accurate: 0.19801980198019803
+
+    '''
+    pyro.clear_param_store()
+    # setup the inference algorithm
+    optim_sgd2 = pyro.optim.SGD({"lr": 0.01, "momentum": 0.1})
+    svi = SVI(model4, guide_model4, optim_sgd2, loss=Trace_ELBO())
+
+    progress = ProgressCmd(steps)
+    losses = []
+    
+    # do gradient steps
+    for step in range(steps):
+        loss = svi.step(y_obs=y_obs)
+        losses.append(loss)
+        progress.succ(step)
+    progress.print_end()
+
+    print("_PYRO_PARAM_STORE constrained params:")
+    for name_key in _PYRO_PARAM_STORE._params:
+        # return constrained param:
+        pname = name_key + ": " + str(_PYRO_PARAM_STORE[name_key])
+        print(pname)
+
+    plt.plot(losses)
+    plt.show()
+
+
+if __name__ == "__main__":
+    
+    test_rejection_sampler1_m4(
+        y_obs=torch.tensor(0.2), N=700, threshold=0.4)
+    
+    # test_rejection_sampler1_m4(
+    #     y_obs=torch.tensor(0.2), N=3000, threshold=0.)
+    # this will show the hist of the var x around 0.2
+
+    # test_rejection_sampler1_m4(
+    #     y_obs=torch.tensor(-0.2), N=3000, threshold=0.)
+    # this will show the hist of the var x around -0.2
+
+    # test_elbo_m4(30, torch.tensor(-0.2))
+    # res a: -0.1989
+    # accurate: -0.19801980198019803
+
+    # test_elbo_m4(30, torch.tensor(0.2))
+    # res a: 0.2050
+    # accurate: 0.19801980198019803
+
 
     # test_rejection_sampler_m3(model=model3, fcondition=m3_fcond0, N=1700)
     # 1698/1700 ~ 0.9988
@@ -369,7 +495,7 @@ if __name__ == "__main__":
     '''
 
     # test_rejection_sampler_m1(model=model2, fcondition=m2_fcond, N=700)
-    test_rejection_sampler_m1(model=model1, fcondition=m1_fcond, N=7000)
+    # test_rejection_sampler_m1(model=model1, fcondition=m1_fcond, N=7000)
     # result: [0.14980545 0.85019455]
     # accurate P(B|a>=0.7) =P(B, a>=0.7)/p(a>=0.7) =  <0.15, 0.85>
     

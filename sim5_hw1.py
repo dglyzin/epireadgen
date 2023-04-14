@@ -40,9 +40,12 @@ class Seddle():
         return(Ax)
     
     def calc_lossA(self, loss):
+        # minimum for A side means minimum of loss:
         return loss
     
     def calc_lossB(self, loss):
+        # maximum for a B side means maximum of loss
+        # and hence minimum for -loss:
         lossB = - loss
         # lossB = - loss + self.depsilon.sample()
         return lossB
