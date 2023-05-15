@@ -183,7 +183,7 @@ class RunnerSeddleModelElbo(rejsam.RunnerSeddleModel):
         print("\nA elbo1.loss:")
         print(elbo1.loss(replayed_model1, replayed_guide1))
 
-    def finilize_extended(Axs, Ays, lossesA_svi, lossesB_svi):
+    def finilize_extended(self, Axs, Ays, lossesA_svi, lossesB_svi):
         tAxs = torch.cat(list(map(
             lambda a: a.unsqueeze(0), Axs)), 0)
         print("\nmean Axs:", torch.mean(tAxs, 0))
@@ -261,15 +261,15 @@ def elbo_maxmin(
         gtrace, rtrace, rgtrace = replayed_res[2:]
         
         # FOR checking elbo:
-        model_runner.check_elbo(replayed_model1, replayed_guide1,
-                                rtrace, rgtrace)
+        # model_runner.check_elbo(replayed_model1, replayed_guide1,
+        #                         rtrace, rgtrace)
         # END FOR
-        print("\nA gtrace.nodes")
-        print(gtrace.nodes)
-        print("A rtrace.nodes")
-        print(rtrace.nodes)
-        print("A rgtrace.nodes")
-        print(rgtrace.nodes)
+        # print("\nA gtrace.nodes")
+        # print(gtrace.nodes)
+        # print("A rtrace.nodes")
+        # print(rtrace.nodes)
+        # print("A rgtrace.nodes")
+        # print(rgtrace.nodes)
         
         # the lossA of the factor(lossA) only:
         lossA = model.get_factor_loss(rtrace, "lossA")
@@ -309,7 +309,7 @@ def elbo_maxmin(
         # if it exist alredy we can collect the trace
         # by rerunning the model
         replayed_res = model_runner.get_replayed(f, g)
-        rtrace = replayed_res[4]
+        rtrace = replayed_res[3]
         # TODO: use hol here:
 
         # the lossB of the factor(lossB) only:

@@ -155,18 +155,7 @@ class SeddleWithScores(Seddle):
         return True
 
 
-class RunnerSeddleModel(scimaxmin.RunnerSeddleModel):
-    def __init__(self, a, b):
-        self.a = a
-        self.b = b
-
-    def get_model(self):
-        a = self.a
-        b = self.b
-        model = Seddle(a, b)
-        model.init_params_dist()
-        return model
-
+class RunnerFinalizeMean():
     def finalize(self, lossesA, lossesB, Ax, Ay):
     
         # print("lossesA:", lossesA)
@@ -192,6 +181,40 @@ class RunnerSeddleModel(scimaxmin.RunnerSeddleModel):
         plt.show()
 
 
+class RunnerSeddleModel(scimaxmin.RunnerSeddleModel, RunnerFinalizeMean):
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+    def get_model(self):
+        a = self.a
+        b = self.b
+        model = Seddle(a, b)
+        model.init_params_dist()
+        return model
+
+    def finalize_extended(self, Axs, Ays):
+       
+        tAxs = torch.cat(list(map(
+            lambda a: a.unsqueeze(0), Axs)), 0)
+        print("\nmean Axs:", torch.mean(tAxs, 0))
+        print("var Axs:", torch.var(tAxs))
+
+        tAys = torch.cat(list(map(
+            lambda a: a.unsqueeze(0), Ays)), 0)
+        print("\nmean Ays:", torch.mean(tAys, 0))
+        print("var Ays:", torch.var(tAys))
+
+        fig, axs = plt.subplots(1, 2)
+
+        axs.flat[0].plot(Axs)
+        axs.flat[0].set_title("Axs")
+        axs.flat[1].plot(Ays)
+        axs.flat[1].set_title("Ays")
+
+        plt.show()
+
+
 class RunnerSeddleModelScore(RunnerSeddleModel):
     def get_model(self):
         a = self.a
@@ -201,48 +224,69 @@ class RunnerSeddleModelScore(RunnerSeddleModel):
         return model
     
 
-class HwModel0(sm1.HwModel):
+class HwModel(sm1.HwModel):
     '''with use of factors'''
 
     # used to redefine the gen_params
+    '''
     def gen_params(self):
         # define starting points
         Ax = torch.tensor([[0.1449, 0.9720],
                            [0.8551, 0.0280]])
         Ay = torch.tensor([[0.3485, 0.4437],
                            [0.6515, 0.5563]])
-        return (Ax, Ay)
-
-    def model_condA(self, trace):
-        udist = trace.nodes["event_error_factor"]['fn']
-        value = trace.nodes["event_error_factor"]['value']
-        self.factorA = udist.log_prob(value)
-        return self.factorA >= 0
-        # return trace.nodes["y_1"]["value"] <= 0
-
-    def model_condB(self, trace):
-        udist = trace.nodes["event_error_factor"]['fn']
-        value = trace.nodes["event_error_factor"]['value']
-        self.factorB = udist.log_prob(value)
-        return self.factorB < self.sim_spec["scores"][1]["factor"]
-        # return trace.nodes["y_1"]["value"] <= 0
-
+        return (Ax, Ax.detach().clone())
+        # return (Ax, Ay)
+    '''
     def get_funcA(self, Ay):
-
+        # print("\nSideA: Ay:", Ay)
         def f():
             # since several Ax in on loop:
             # pyro.clear_params_store()
 
             # Ax = self.gen_param("Ax", self.dA)
 
-            self.run_model(None, Ay)
+            # play for a side A:
+            self.sim_spec["agents"]["A"]["goal"] = lambda x, y: y[1] <= 0
+            self.sim_spec["agents"]["B"]["goal"] = lambda x, y: y[1] > 0
 
+            # if goalA succ then override the factor to 0. and exit
+            # if goalB succ then wait for a next step
+            self.sim_spec["init_factor"] = -110.0
+            self.sim_spec["scores"][0]["exit"] = True
+            self.sim_spec["scores"][1]["exit"] = False
+
+            loss, Ax1, Ay1, x, y = self.run_model(None, Ay)
+            # print("\nsideA: Ax1", Ax1)
+            # print("given Ay:", Ay)
+            # print("lossA:", loss)
+            pyro.deterministic("lossA", loss)
+            pyro.deterministic("Ax1", Ax1)
+            pyro.deterministic("y_1", y)
         return f
 
     def get_funcB(self, Ax):
-
+        # print("Side B Ax:", Ax)
         def f():
-            self.run_model(Ax, None)
+            # play for a side B:
+            self.sim_spec["agents"]["A"]["goal"] = lambda x, y: x[1] > 0
+            self.sim_spec["agents"]["B"]["goal"] = lambda x, y: x[1] <= 0
+            # if goalB fail then wait for a next step
+            # if goalA fail then override the factor to -inf and exit
+            # (the zero will still be preserved as succ in that case, 
+            #  so no need for model_condB to be changed)
+            self.sim_spec["init_factor"] = 0.0
+            self.sim_spec["scores"][0]["exit"] = False
+            self.sim_spec["scores"][1]["exit"] = True
+
+            loss, Ax1, Ay1, x, y = self.run_model(None, Ax)
+            # print("\nsideB: Ay= Ax1", Ax1)
+            # print("given Ax:", Ax)
+            # print("lossB", loss)
+            # print("x, y:", x, y)
+            pyro.deterministic("lossB", loss)
+            pyro.deterministic("Ay1", Ax1)
+            pyro.deterministic("y_1", x)
         return f
 
     def run_model(self, Ax, Ay):
@@ -254,29 +298,52 @@ class HwModel0(sm1.HwModel):
         observations = ehandler.get("observation")
         Ax = observations[1][-1]["value"]["Ax"]
         Ay = observations[1][-1]["value"]["Ay"]
-        pyro.deterministic("Ax_1", Ax)
-        pyro.deterministic("Ay_1", Ay)
-
+        
         x = observations[1][-1]["value"]["x"]
         y = observations[1][-1]["value"]["y"]
         # print("y", observations[1][-1]["value"]["y"])
         
-        pyro.deterministic("x_1", x)
-        pyro.deterministic("y_1", y)
         # raise Exception("dbg")        
-        
+        factor = ehandler.trace.nodes["event_error_factor"]
+        factor_value = factor["value"]
+        # print("factor_value:", factor_value)
+        factor_log = factor["fn"].log_prob(factor_value)
+        # print("factor_log:", factor_log)
+        # pyro.deterministic("loss", factor_log)
+        # let get_func{A/B} decide what error to return
+        return (factor_log, Ax, Ay, x, y)
 
-class HwModel1(HwModel0):
+
+class HwModelWithFactors(HwModel):
+    def model_condA(self, trace):
+        return self.model_cond(trace)
+
+    def model_condB(self, trace):
+        return self.model_cond(trace)
+
+    def model_cond(self, trace):
+        '''The same methods could been used
+        since the sides been switched in run_model.'''
+
+        udist = trace.nodes["event_error_factor"]['fn']
+        value = trace.nodes["event_error_factor"]['value']
+        factor = udist.log_prob(value)
+        # print("self.factorA:", self.factorA)
+        return float(factor) >= self.sim_spec["scores"][0]["factor"]
+        # return trace.nodes["y_1"]["value"] <= 0
+
+
+class HwModelWithoutFactors(HwModel):
     ''''without factors'''
 
     def model_condA(self, trace):
-        self.factorA = trace.nodes["y_1"]["value"][1]
-        return self.factorA <= 0
+        factorA = trace.nodes["y_1"]["value"][1]
+        return factorA <= 0
 
     def model_condB(self, trace):
-        self.factorB = trace.nodes["y_1"]["value"][1]
-        # TODO: test: maybe worse to relax that a bit: 
-        return self.factorB > 0
+        factorB = trace.nodes["y_1"]["value"][1]
+        # TODO: test: maybe worth to relax that a bit: 
+        return factorB > 0
 
     '''
     # alternative:
@@ -291,11 +358,102 @@ class HwModel1(HwModel0):
     '''
 
 
-class RunnerHwModel(scimaxmin.RunnerHwModel):
+class HwModelWithoutFactorsScores(HwModel):
+    ''''without factors'''
+    # FOR rs.observe - used to observe the scores in trace
+    # after a sample of the model been made:
+    def observerA(self, trace):
+        y = trace.nodes["y_1"]['value']
+        return -y[1]/0.5
+
+    def observerB(self, trace):
+        y = trace.nodes["y_1"]['value']
+        return -(0.5-y[1])/0.5
+
+    def observer(self, trace, var):
+    
+        val = trace.nodes[var]['value']
+        fn = trace.nodes[var]['fn']
+        # score = val
+        score = fn.log_prob(val)
+        
+        # print("observer ", var, " score ", score)
+        return(score)
+    # END FOR
+
+    def model_condA(self, trace):
+        # they are not realy used
+        # since rj scores usage for continues
+        return True
+        
+    def model_condB(self, trace):
+        # they are not realy used
+        # since rj scores usage for continues
+        return True
+
+
+class RunnerHwModel(scimaxmin.RunnerHwModel, RunnerFinalizeMean):
+    def __init__(self, use_factors, use_score, dbg=False):
+        self.use_factors = use_factors
+        self.use_score = use_score
+        self.dbg = dbg
+
+    def get_model(self):
+        sim_spec = smt.mk_spec_for_test0()
+
+        if self.use_score:
+            cHwModel = HwModelWithoutFactorsScores
+        else:
+            if self.use_factors:
+                cHwModel = HwModelWithFactors
+            else:
+                cHwModel = HwModelWithoutFactors
+
+        model = cHwModel(sim_spec, dbg=self.dbg)
+
+        model.init_params_dist()
+        return model
+
     def prepare_param(self, Ax):
         return Ax
 
+    def finalize(self, lossesA, lossesB, Ax, Ay):
+        # print("lossesA:", lossesA)
+        # print("lossesB:", lossesB)
+        
+        print("lossesA[-1]:", lossesA[-1])
+        print("lossesB[-1]:", lossesB[-1])
+        print("Ax:", Ax)
+        print("Ay:", Ay)
 
+    def finalize_extended(self, Axs, Ays):
+        tAxs = torch.cat(list(map(
+            lambda a: a.unsqueeze(0), Axs)), 0)
+        print("\nmean Axs:", torch.mean(tAxs, 0))
+        print("var Axs:", torch.var(tAxs))
+
+        tAys = torch.cat(list(map(
+            lambda a: a.unsqueeze(0), Ays)), 0)
+        print("\nmean Ays:", torch.mean(tAys, 0))
+        print("var Ays:", torch.var(tAys))
+                
+        # print("tAxs:", tAxs)
+        # print("tAys:", tAys)
+
+        fig, axs = plt.subplots(2, 2)
+
+        axs.flat[0].plot(tAxs[:, 0, 0])
+        axs.flat[0].set_title("Axs[:, 0, 0]")
+        axs.flat[1].plot(tAxs[:, 0, 1])
+        axs.flat[1].set_title("Axs[:, 0, 1]")
+        axs.flat[2].plot(tAys[:, 0, 0])
+        axs.flat[2].set_title("Ays[:, 0, 0]")
+        axs.flat[3].plot(tAys[:, 0, 1])
+        axs.flat[3].set_title("Ays[:, 0, 1]")
+
+        plt.show()
+
+       
 def model(sim_spec=None, **kwargs):
     ehandler = sm.model(sim_spec, **kwargs)
 
@@ -308,6 +466,20 @@ def model(sim_spec=None, **kwargs):
     '''
 
 
+def test_maxmin_hw(
+        steps, sampler_steps=1,
+        use_score=False, threshold=0., max_counter=100,
+        use_factors=True,
+        dbg=False):
+    model_runner = RunnerHwModel(
+        use_factors, use_score)
+    test_rs_maxmin(
+        steps, model_runner,
+        sampler_steps=sampler_steps,
+        use_score=use_score, max_counter=max_counter, threshold=threshold,
+        dbg=dbg)
+
+    
 def test_maxmin_seddle(
         steps, sampler_steps=1, use_score=False, threshold=0., max_counter=100,
         dbg=False):
@@ -347,7 +519,7 @@ def test_rs_maxmin(
         while len(samples) == 0:
             i += 1
             if i > max_counter:
-                raise(Exception("max_counter excided"))
+                raise(Exception("max_counter excided in get_optA"))
             
             samples = sim3.rejection_sampling1(
                 model.get_funcA(Ay), {}, model.model_condA, sampler_steps,
@@ -382,7 +554,7 @@ def test_rs_maxmin(
         while len(samples) == 0:
             i += 1
             if i > max_counter:
-                raise(Exception("max_counter excided"))
+                raise(Exception("max_counter excided in get_optB"))
 
             samples = sim3.rejection_sampling1(
                 model.get_funcB(Ax), {}, model.model_condB, sampler_steps,
@@ -407,26 +579,19 @@ def test_rs_maxmin(
 
         return lossB, res_Ay
 
-    scimaxmin.optimize_maxmin(steps, model_runner, get_optA, get_optB, dbg=dbg)
-    
-    tAxs = torch.cat(list(map(
-        lambda a: a.unsqueeze(0), Axs)), 0)
-    print("\nmean Axs:", torch.mean(tAxs, 0))
-    print("var Axs:", torch.var(tAxs))
+    try:
+        scimaxmin.optimize_maxmin(
+            steps, model_runner, get_optA, get_optB, dbg=dbg)
 
-    tAys = torch.cat(list(map(
-        lambda a: a.unsqueeze(0), Ays)), 0)
-    print("\nmean Ays:", torch.mean(tAys, 0))
-    print("var Ays:", torch.var(tAys))
+    except Exception as e:
+        print("forcing exit due to error:")
+        print(e)
+        if "get_optA" in str(e):
+            print("the cause are: A side fail to find solution (i.e. Ax)!")
+        elif "get_optB" in str(e):
+            print("the cause are: B side fail to find solution (i.e. Ay)!")
 
-    fig, axs = plt.subplots(1, 2)
-
-    axs.flat[0].plot(Axs)
-    axs.flat[0].set_title("Axs")
-    axs.flat[1].plot(Ays)
-    axs.flat[1].set_title("Ays")
-
-    plt.show()
+    model_runner.finalize_extended(Axs, Ays)
 
 
 def test_rs():
@@ -454,6 +619,32 @@ def test_rs():
 
 
 if __name__ == "__main__":
+    '''
+    # use_score=True
+    # TODO: seems not working correctly:
+    test_maxmin_hw(
+        30, sampler_steps=1,
+        use_score=True, threshold=1.7, max_counter=3000,
+        use_factors=False,
+        dbg=False)
+    '''
+    '''
+    # use_factors=False
+    test_maxmin_hw(
+        30, sampler_steps=1,
+        use_score=False, threshold=0.0, max_counter=3000,
+        use_factors=False,
+        dbg=False)
+    '''
+    
+    # use_factors=True
+    test_maxmin_hw(
+        30, sampler_steps=1,
+        use_score=False, threshold=0.0, max_counter=3000,
+        use_factors=True,
+        dbg=False)
+    
+
     # test_maxmin_seddle(70, sampler_steps=70, use_score=False, threshold=0.0, max_counter=3000, dbg=False)
     # lossesA[-1]: tensor(0.0018)
     # lossesB[-1]: tensor(-0.0013)
@@ -468,7 +659,7 @@ if __name__ == "__main__":
     # mean Ays: tensor(0.6966)
     # var Ays: tensor(0.0003)
 
-    test_maxmin_seddle(70, sampler_steps=70, use_score=True, threshold=0.0, max_counter=3000, dbg=False)
+    # test_maxmin_seddle(70, sampler_steps=70, use_score=True, threshold=0.0, max_counter=3000, dbg=False)
     # lossesA[-1]: tensor(-2.0817)
     # lossesB[-1]: tensor(-0.4801)
     # mean lossesA: tensor(-2.1176)

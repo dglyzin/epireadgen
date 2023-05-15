@@ -232,7 +232,26 @@ def test1():
     factors = run_tests_and_collect_factors(30, sim_spec)
 
 
+def test2():
+    sim_spec = mk_spec_for_test0()
+    sim_spec["agents"]["A"]["decision_matrix"] = torch.tensor(
+        [[0.2203, 0.2299],
+         [0.7797, 0.7701]])
+
+    sim_spec["agents"]["B"]["decision_matrix"] = torch.tensor(
+        [[1., 1.],
+         [0.0, 0.0]])
+
+    run_test_and_show(sim_spec, mdbg=True)
+
+    # mcmc, losses = sm.run_mcmc(90, sim_spec, mdbg=False, edbg=False)
+    # sim_spec = sm.update_spec(sim_spec, mcmc, idx=-1, side="A", dbg=False)
+    # print("\nsolution:", sim_spec['agents']['A'])
+    factors = run_tests_and_collect_factors(30, sim_spec)
+
+
 if __name__ == "__main__":
-    test0()
+    test2()
+    # test0()
     # test1()
     
