@@ -45,7 +45,8 @@ succ_sum = do
   return sn'
 
 -- and another context for some sums process events:
-type EventStates = [String]
+type EventState = (String, String, String)
+type EventStates = [[EventState]]
 type EventHandler g = StateT EventStates (SuccSum g)
 succ_ehandler::(RandomGen g)=> EventHandler g Int
 succ_ehandler = do
@@ -55,24 +56,44 @@ succ_ehandler = do
   -- (i.e. the lifted state will be changed):
   i<-lift $ lift $ get
 
+  let collected_events = (
+        case sn of
+          0 -> [("zero sn in step ", (show i), "")]
+          _ -> [])
   -- catching some events:
-  case sn of 0 ->               
-               modify (\s->s++["zero sn in step "++(show i)])
+  {-
+  case sn of 0 ->
+               --collected_events = collected_events ++ [("zero sn in step ", (show i), "")]
+               -- return ()
+               modify (\s->s++[("zero sn in step ", (show i), "")])
              _ ->
-               -- this just means do nothing
+               -- this just means do nothing (not actual return from func)
                return ()
-
+  -}
   --modify (\s-> s++["ho"])             
 
   -- catching some more events:
   snl<- lift $ get
+  
+  let collected_events1 = collected_events ++ (
+        case snl of (sn':sn'':_)->
+                      if sn' >= sn'' then
+                        [("going up:", (show sn''), (show sn'))]
+                      else
+                        [("going down:", (show sn''), (show sn'))]
+                    snl' -> [])
+  modify (\s->s++[collected_events1])                     
+  {-
   case snl of (sn':sn'':_) ->
                 if sn' >= sn'' then
-                  modify (\s->s++["going up:"++(show sn')++" from "++ (show sn'')])
+                  modify (\s->s++[("going up:", (show sn''), (show sn'))])
                 else
-                  modify (\s->s++["going down:"++(show sn')++" from "++(show sn'')])
+                  modify (\s->s++[("going down:", (show sn''), (show sn'))])
+
+              -- otherwise
               snl' ->
                 return ()
+  -}
   return sn
 
 -- helper:
@@ -80,7 +101,7 @@ type SeqState g = ((((Int, EventStates), SumStates), Int), g)
 run_once::(RandomGen g)=>EventHandler g Int->EventStates->SumStates->Int->g->SeqState g
 run_once ehandler est sumst jst gen = (runState (runStateT (runStateT (runStateT ehandler est) sumst) jst) gen)
 
--- helper:
+-- helper (for traverse_):
 succ_seq::(RandomGen g)=>EventHandler g Int->StateT Int (EventHandler g) ()
 succ_seq succ = do
   a<-lift $ succ
@@ -94,10 +115,48 @@ succ_seq1::(RandomGen g)=> [Int] -> SeqState' g ()
 succ_seq1 = traverse_ (\j-> succ_seq succ_ehandler)
 -- TODO: collect weights
 
+type WeightedStates = [(EventState, Int)]
+type EventWeightedHandler g = StateT WeightedStates (EventHandler g)
+
+-- collect counts of all happend events during sequential execution of succ_ehandler (i.e factorize them mod time): 
+succ_ewhandler::(RandomGen g)=> EventWeightedHandler g ()
+succ_ewhandler = do
+  x <- lift $ succ_ehandler
+  events <- lift $ get
+ 
+  case events of (e:es)->
+                   modify (\s-> update s (last events))
+                 --(e:es)->modify (\s->s++[(((show e),(show x),(show events)),1)])
+                 []-> return ()
+                 
+  return ()
+
+-- events factorization - if more then one have happend then
+-- (from, to) value will be ignored (replaced by ("", "")):
+update::WeightedStates->[EventState]->WeightedStates
+update xs@(((ex1, ex2, ex3), val):rxs) es@((e1,e2,e3):res)
+  | ex1 == e1 = [((ex1, "", ""), val+1)] ++ (update rxs res) 
+  | otherwise = [((ex1, "", ""), val)]++(update rxs es)  
+    
+update [] (e:res) = (update [(e, 1)] res)
+update xs [] = xs
+    
+succ_seq1w::(RandomGen g)=>[Int]->EventWeightedHandler g ()
+succ_seq1w = traverse_ (\j->succ_ewhandler)
+
 main = do
   time <- getSystemTime
   let gen = (mkStdGen (read (show (systemNanoseconds time))))
-  (putStr "test3: succ_seq1::\n")
+
+  (putStr "test4: succ_seq1w::\n")
+  (putStr $ (show (runState (runStateT (runStateT (runStateT (runStateT (succ_seq1w [1..7]) []) []) []) 0) gen)))
+
+  (putStr "test4.2: succ_ewhandler::\n")
+  (putStr $ (show (runState (runStateT (runStateT (runStateT (runStateT (succ_ewhandler) []) []) []) 0) gen)))
+  
+  (putStr "\ntest4.1: update::\n")
+  (putStr $ (show (update [] [("a", "a", "a")])))
+  (putStr "\ntest3: succ_seq1::\n")
   (putStr $ (show (runState (runStateT (runStateT (runStateT (runStateT (succ_seq1 [1..7]) 0) []) []) 0) gen)))
   --(putStr $ (show (run_once (runStateT (succ_seq1 [1..7]) 0) [] [] 0 gen)))
   (putStr "\n----------------\n")
